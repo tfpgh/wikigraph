@@ -1,0 +1,18 @@
+[project]
+name = "wikigraph"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "igraph>=0.11.8",
+    "loguru>=0.7.3",
+    "requests>=2.32.3",
+    "rustworkx>=0.16.0",
+    "tqdm>=4.67.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+]
