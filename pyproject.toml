@@ -5,10 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "duckdb>=1.2.2",
     "igraph>=0.11.8",
     "loguru>=0.7.3",
+    "pandas>=2.2.3",
     "requests>=2.32.3",
-    "rustworkx>=0.16.0",
     "tqdm>=4.67.1",
 ]
 

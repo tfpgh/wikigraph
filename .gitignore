@@ -177,3 +177,6 @@ dumps/**
 !dumps/.gitkeep
 
 **/.DS_Store
+
+combined_dumps.db
+combined_dumps.db.wal
