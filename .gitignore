@@ -176,7 +176,10 @@ cython_debug/
 dumps/**
 !dumps/.gitkeep
 
-**/.DS_Store
+graph_data/**
+!graph_data/.gitkeep
 
-combined_dumps.db
-combined_dumps.db.wal
+parsed_graph/**
+!parsed_graph/.gitkeep
+
+**/.DS_Store

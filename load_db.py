@@ -114,8 +114,8 @@ def _get_insertions_df_from_str(
                     int(insertion[0]),
                     int(insertion[1]),
                     insertion[2],
-                    bool(insertion[3]),
-                    bool(insertion[4]),
+                    bool(int(insertion[3])),
+                    bool(int(insertion[4])),
                     float(insertion[5]),
                     insertion[6],
                     insertion[7],
@@ -152,7 +152,7 @@ logger.info("Starting dump downloads")
 for dump_filename in DB_DUMP_FILENAMES:
     local_dump_path = LOCAL_DUMP_DIRECTORY / dump_filename
 
-    # Check if we have already downloaded the dump
+    # Check if we already downloaded the dump
     if local_dump_path.exists():
         logger.info(f"{dump_filename} already exists. Skipping download")
         continue
@@ -173,16 +173,17 @@ for dump_filename in DB_DUMP_FILENAMES:
         logger.error(f"Failed to download {dump_filename}")
         raise Exception(f"Failed to download {dump_filename}")
 
-logger.info("Are you sure you want to regenerate the DuckDB database?")
-check_input = input("Type yes to continue. Anything else will cancel: ")
-if check_input != "yes":
-    raise ValueError("Canceling.")
+if Path("dumps/combined_dumps.db").exists():
+    logger.info("Are you sure you want to regenerate the DuckDB database?")
+    check_input = input("Type yes to continue. Anything else will cancel: ")
+    if check_input != "yes":
+        raise ValueError("Canceling.")
 
-Path("combined_dumps.db").unlink(missing_ok=True)
-Path("combined_dumps.db.wal").unlink(missing_ok=True)
+Path("dumps/combined_dumps.db").unlink(missing_ok=True)
+Path("dumps/combined_dumps.db.wal").unlink(missing_ok=True)
 
 logger.info("Starting DB loading")
-duckdb_con = duckdb.connect("combined_dumps.db")
+duckdb_con = duckdb.connect("dumps/combined_dumps.db")
 duckdb_con.sql(DUCKDB_TABLE_SQL)
 
 for dump_filename in DB_DUMP_FILENAMES:
