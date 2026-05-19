@@ -53,7 +53,8 @@ def normalize_title(title: str) -> str:
     """
     title = title.replace("_", " ").strip()
 
-    assert len(title) != 0, "Empty title found"
+    if not title:
+        return title
 
     return title[0].upper() + title[1:]
 
@@ -101,7 +102,7 @@ def process_stream(
 
         # Only namespace-0 articles
         ns_match = NS_RE.search(page_xml)
-        if not ns_match or ns_match != "0":
+        if not ns_match or ns_match.group(1) != "0":
             continue
 
         title_match = TITLE_RE.search(page_xml)
