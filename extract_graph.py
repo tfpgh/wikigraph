@@ -22,6 +22,12 @@ TITLE_RE = re.compile(r"<title>([^<]*)</title>")
 NS_RE = re.compile(r"<ns>(\d+)</ns>")
 TEXT_RE = re.compile(r"<text[^>]*>(.*?)</text>", re.DOTALL)
 REDIRECT_RE = re.compile(r"#REDIRECT\s*\[\[([^\]|#]+)", re.IGNORECASE)
+REF_RE = re.compile(r"<ref[^>]*?(?:/>|>.*?</ref>)", re.DOTALL)
+TRUNCATE_RE = re.compile(
+    r"==\s*(references|notes|bibliography|external links|"
+    r"further reading|sources|citations|works cited|footnotes)\s*==",
+    re.IGNORECASE,
+)
 
 LINK_RE = re.compile(r"\[\[([^\]|#<>{}\n]+?)(?:[|#][^\]]*)?\]\]")
 
@@ -112,6 +118,14 @@ def process_stream(
 
         title = normalize_title(title_match.group(1))
         text = text_match.group(1)
+
+        # Strip inline citations (removes links to publishers, authors, journals)
+        text = REF_RE.sub("", text)
+
+        # Truncate at the first reference-style section header
+        truncate_match = TRUNCATE_RE.search(text)
+        if truncate_match:
+            text = text[: truncate_match.start()]
 
         # Redirect has to be at the top of the text
         redirect_match = REDIRECT_RE.search(text[:300])
