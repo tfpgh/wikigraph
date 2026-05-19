@@ -169,7 +169,7 @@ if __name__ == "__main__":
     results = Parallel(n_jobs=-1, return_as="generator_unordered", backend="loky")(
         delayed(process_stream)(start, end) for start, end in offsets
     )
-    for pages, links in tqdm(
+    for pages, links in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
         results, total=len(offsets), desc="Processing streams", unit=" streams"
     ):
         all_pages.extend(pages)
