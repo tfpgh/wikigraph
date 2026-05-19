@@ -107,7 +107,35 @@ def compute_layout() -> None:
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
         prevent_overlapping=False,
+        verbose=True,
+    )
+
+    cx = float(pos["x"].median())
+    cy = float(pos["y"].median())
+    max_abs = max(
+        float((pos["x"] - cx).abs().max()),
+        float((pos["y"] - cy).abs().max()),
+    )
+    scale = (WORLD_EXTENT / 2) / max_abs
+    vertex_radius = vertex_radius.assign(radius=lambda d: d["radius"] / scale)
+
+    logger.info("Running ForceAtlas2 overlap cleanup")
+    pos = cugraph.force_atlas2(
+        G,
+        max_iter=50,
+        pos_list=pos,
+        scaling_ratio=2.0,
+        gravity=1.0,
+        strong_gravity_mode=False,
+        lin_log_mode=False,
+        edge_weight_influence=1.0,
+        jitter_tolerance=0.05,
+        barnes_hut_optimize=True,
+        barnes_hut_theta=0.5,
+        outbound_attraction_distribution=True,
+        prevent_overlapping=True,
         vertex_radius=vertex_radius,
+        overlap_scaling_ratio=1.0,
         verbose=True,
     ).rename(columns={"vertex": "id"})
 
