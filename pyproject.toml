@@ -4,4 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "joblib>=1.5.3",
+    "loguru>=0.7.3",
+    "polars>=1.40.1",
+    "tqdm>=4.67.3",
+]
