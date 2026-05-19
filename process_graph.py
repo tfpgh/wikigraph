@@ -67,7 +67,7 @@ def compute_clusters() -> None:
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
-    partitions, modularity = cugraph.leiden(G, resolution=0.5)
+    partitions, modularity = cugraph.leiden(G, resolution=1.0)
     partitions = partitions.rename(columns={"vertex": "id"})
 
     n_clusters = int(partitions["partition"].nunique())  # pyright: ignore[reportOptionalMemberAccess, reportArgumentType]
@@ -96,7 +96,7 @@ def compute_layout() -> None:
 
     pos = cugraph.force_atlas2(
         G,
-        max_iter=1000,
+        max_iter=750,
         scaling_ratio=2.0,
         gravity=1.0,
         strong_gravity_mode=False,
@@ -106,7 +106,7 @@ def compute_layout() -> None:
         barnes_hut_optimize=True,
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
-        prevent_overlapping=True,
+        prevent_overlapping=False,
         vertex_radius=vertex_radius,
         verbose=True,
     ).rename(columns={"vertex": "id"})
