@@ -12,4 +12,4 @@
 #SBATCH --constraint=GPU_SKU:RTX6000
 
 
-uv run extract_graph.py
+uv run process_graph.py
