@@ -10,3 +10,15 @@ dependencies = [
     "polars>=1.40.1",
     "tqdm>=4.67.3",
 ]
+[project.optional-dependencies]
+cuda13 = [
+    "cugraph-cu13>=26.4.0",
+]
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+explicit = true
+
+[tool.uv.sources]
+cugraph-cu13 = { index = "nvidia" }
