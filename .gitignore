@@ -224,3 +224,6 @@ dumps/*
 
 intermediates/*
 !intermediates/.gitkeep
+
+logs/*
+!logs/.gitkeep
