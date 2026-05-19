@@ -86,12 +86,17 @@ def compute_layout() -> None:
     logger.info("Running ForceAtlas2")
     edges_df = cudf.read_parquet(EDGES_INPUT_PATH)
 
+    pagerank_df = cudf.read_parquet(PAGERANK_PATH)
+    vertex_radius = pagerank_df.rename(columns={"id": "vertex"}).assign(
+        radius=lambda d: d["pagerank"] ** 0.3 * 100
+    )[["vertex", "radius"]]
+
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
     pos = cugraph.force_atlas2(
         G,
-        max_iter=500,
+        max_iter=1000,
         scaling_ratio=2.0,
         gravity=1.0,
         strong_gravity_mode=False,
@@ -101,7 +106,8 @@ def compute_layout() -> None:
         barnes_hut_optimize=True,
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
-        prevent_overlapping=False,
+        prevent_overlapping=True,
+        vertex_radius=vertex_radius,
         verbose=True,
     ).rename(columns={"vertex": "id"})
 
