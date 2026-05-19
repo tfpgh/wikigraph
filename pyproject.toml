@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "joblib>=1.5.3",
     "loguru>=0.7.3",
+    "matplotlib>=3.10.9",
     "polars>=1.40.1",
     "tqdm>=4.67.3",
 ]
