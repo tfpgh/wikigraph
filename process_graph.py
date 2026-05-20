@@ -88,7 +88,7 @@ def compute_layout() -> None:
 
     pagerank_df = cudf.read_parquet(PAGERANK_PATH)
     vertex_radius = pagerank_df.rename(columns={"id": "vertex"}).assign(
-        radius=lambda d: d["pagerank"] ** 0.3 * 100
+        radius=lambda d: d["pagerank"] ** 0.5 * 100
     )[["vertex", "radius"]]
 
     G = cugraph.Graph(directed=False)
