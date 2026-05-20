@@ -110,11 +110,16 @@ def compute_layout() -> None:
         verbose=True,
     )
 
-    cx = float(pos["x"].median())
-    cy = float(pos["y"].median())
+    pos_x = pos["x"]
+    pos_y = pos["y"]
+
+    assert pos_x is not None and pos_y is not None
+
+    cx = float(pos_x.median())
+    cy = float(pos_y.median())
     max_abs = max(
-        float((pos["x"] - cx).abs().max()),
-        float((pos["y"] - cy).abs().max()),
+        float((pos_x - cx).abs().max()),
+        float((pos_y - cy).abs().max()),
     )
     scale = (WORLD_EXTENT / 2) / max_abs
     vertex_radius = vertex_radius.assign(radius=lambda d: d["radius"] / scale)
@@ -139,10 +144,15 @@ def compute_layout() -> None:
         verbose=True,
     ).rename(columns={"vertex": "id"})
 
+    pos_x = pos["x"]
+    pos_y = pos["y"]
+
+    assert pos_x is not None and pos_y is not None
+
     logger.info(
         f"Raw layout extents: "
-        f"x: [{float(pos['x'].min()):.1f}, {float(pos['x'].max()):.1f}], "
-        f"y:  [{float(pos['y'].min()):.1f}, {float(pos['y'].max()):.1f}]"
+        f"x: [{float(pos_x.min()):.1f}, {float(pos_x.max()):.1f}], "
+        f"y:  [{float(pos_y.min()):.1f}, {float(pos_y.max()):.1f}]"
     )
 
     pos.to_parquet(LAYOUT_PATH, compression="zstd")
