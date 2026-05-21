@@ -10,7 +10,6 @@ OUTPUT_PATH = Path("graph_nodes.png")
 
 IMAGE_SIZE = 20_000
 PADDING = 100
-MIN_PIXEL_RADIUS = 0.1
 
 ZOOM = 1.0
 
@@ -18,6 +17,8 @@ ZOOM = 1.0
 # nodes won't dominate the scale; they'll just render off-canvas.
 CLIP_LOW_PERCENTILE = 0.001
 CLIP_HIGH_PERCENTILE = 0.999
+
+RADIUS_SCALING = 0.8
 
 BACKGROUND_COLOR = skia.Color(0x33, 0x33, 0x33)
 COLOR_SATURATION = 0.9
@@ -52,7 +53,7 @@ def scale_nodes(nodes: pl.DataFrame) -> pl.DataFrame:
     return nodes.with_columns(
         ((pl.col("x") - cx_data) * scale + center).alias("px"),
         ((cy_data - pl.col("y")) * scale + center).alias("py"),
-        (pl.col("radius") * scale).clip(lower_bound=MIN_PIXEL_RADIUS).alias("pr"),
+        (pl.col("radius") * scale * RADIUS_SCALING).alias("pr"),
     )
 
 

@@ -20,7 +20,7 @@ WORLD_EXTENT = 2**16
 # Fraction of the WORLD_EXTENT² canvas covered by node disks. Since
 # Σ pagerank = 1, r = c·√pagerank gives Σπr² = πc², so
 # c = WORLD_EXTENT · √(fill / π).
-TARGET_NODE_FILL = 0.02
+TARGET_NODE_FILL = 0.002
 RADIUS_COEFFICIENT = WORLD_EXTENT * math.sqrt(TARGET_NODE_FILL / math.pi)
 
 # Top N largest clusters get distinct palette colors
@@ -139,6 +139,7 @@ def compute_layout() -> None:
     vertex_radius = vertex_radius.assign(radius=lambda d: d["radius"] / scale_1)
 
     logger.info("Running ForceAtlas2 (pass 2: overlap cleanup)")
+    logger.info("Running initial overlap pass (300 iters)")
     pos = cugraph.force_atlas2(
         G,
         max_iter=300,
@@ -157,150 +158,42 @@ def compute_layout() -> None:
         overlap_scaling_ratio=20.0,
         verbose=True,
     )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.01,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=100.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.003,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.001,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.0005,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.0002,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.00005,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.00001,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
-    pos = cugraph.force_atlas2(
-        G,
-        max_iter=500,
-        pos_list=pos,
-        scaling_ratio=5.0,
-        gravity=1.0,
-        strong_gravity_mode=False,
-        lin_log_mode=False,
-        edge_weight_influence=1.0,
-        jitter_tolerance=0.000005,
-        barnes_hut_optimize=True,
-        barnes_hut_theta=0.5,
-        outbound_attraction_distribution=True,
-        prevent_overlapping=True,
-        vertex_radius=vertex_radius,
-        overlap_scaling_ratio=300.0,
-        verbose=True,
-    )
+
+    for jitter_tolerance in [
+        0.03,
+        0.01,
+        0.005,
+        0.001,
+        0.0005,
+        0.0001,
+        0.00005,
+        0.00001,
+        0.000005,
+        0.000001,
+        0.0000005,
+        0.0000001,
+        0.00000005,
+        0.00000001,
+    ]:
+        logger.info(f"Running 50 iter overlap pass with jt={jitter_tolerance}")
+        pos = cugraph.force_atlas2(
+            G,
+            max_iter=50,
+            pos_list=pos,
+            scaling_ratio=5.0,
+            gravity=1.0,
+            strong_gravity_mode=False,
+            lin_log_mode=False,
+            edge_weight_influence=1.0,
+            jitter_tolerance=jitter_tolerance,
+            barnes_hut_optimize=True,
+            barnes_hut_theta=0.5,
+            outbound_attraction_distribution=True,
+            prevent_overlapping=True,
+            vertex_radius=vertex_radius,
+            overlap_scaling_ratio=300.0,
+            verbose=True,
+        )
 
     pos_x = pos["x"]
     pos_y = pos["y"]
