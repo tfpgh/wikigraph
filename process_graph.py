@@ -71,7 +71,7 @@ def compute_clusters() -> None:
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
-    partitions, modularity = cugraph.leiden(G, resolution=1.0)
+    partitions, modularity = cugraph.leiden(G, resolution=0.7)
     partitions = partitions.rename(columns={"vertex": "id"})
 
     n_clusters = int(partitions["partition"].nunique())  # pyright: ignore[reportOptionalMemberAccess, reportArgumentType]
