@@ -111,13 +111,13 @@ def compute_layout() -> None:
     logger.info("Running ForceAtlas2 (pass 1: rough layout)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=1000,
+        max_iter=2500,
         scaling_ratio=5.0,
         gravity=1.0,
         strong_gravity_mode=False,
         lin_log_mode=False,
         edge_weight_influence=1.0,
-        jitter_tolerance=1.0,
+        jitter_tolerance=0.5,
         barnes_hut_optimize=True,
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
