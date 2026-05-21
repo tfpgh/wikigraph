@@ -8,11 +8,16 @@ from loguru import logger
 INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 OUTPUT_PATH = Path("graph_nodes.png")
 
-IMAGE_SIZE = 10_000
+IMAGE_SIZE = 20_000
 PADDING = 100
-MIN_PIXEL_RADIUS = 0.5
+MIN_PIXEL_RADIUS = 0.1
 
 ZOOM = 1.0
+
+# Clip the fit-bounds to these percentiles of x and y. A few extreme outlier
+# nodes won't dominate the scale; they'll just render off-canvas.
+CLIP_LOW_PERCENTILE = 0.001
+CLIP_HIGH_PERCENTILE = 0.999
 
 BACKGROUND_COLOR = skia.Color(0x33, 0x33, 0x33)
 COLOR_SATURATION = 0.9
@@ -26,21 +31,24 @@ def load_nodes() -> pl.DataFrame:
 
 
 def scale_nodes(nodes: pl.DataFrame) -> pl.DataFrame:
-    min_x = float(nodes["x"].min())
-    max_x = float(nodes["x"].max())
-    min_y = float(nodes["y"].min())
-    max_y = float(nodes["y"].max())
+    lo_x = float(nodes["x"].quantile(CLIP_LOW_PERCENTILE))  # pyright: ignore[reportArgumentType]
+    hi_x = float(nodes["x"].quantile(CLIP_HIGH_PERCENTILE))  # pyright: ignore[reportArgumentType]
+    lo_y = float(nodes["y"].quantile(CLIP_LOW_PERCENTILE))  # pyright: ignore[reportArgumentType]
+    hi_y = float(nodes["y"].quantile(CLIP_HIGH_PERCENTILE))  # pyright: ignore[reportArgumentType]
 
-    extent = max(max_x - min_x, max_y - min_y)
+    extent = max(hi_x - lo_x, hi_y - lo_y)
     if extent <= 0:
         raise ValueError("Layout has no spatial extent")
 
     scale = ZOOM * (IMAGE_SIZE - PADDING * 2) / extent
-    cx_data = (min_x + max_x) / 2
-    cy_data = (min_y + max_y) / 2
+    cx_data = (lo_x + hi_x) / 2
+    cy_data = (lo_y + hi_y) / 2
     center = IMAGE_SIZE / 2
 
-    logger.info(f"Scaling layout by {scale:.4f} (zoom={ZOOM})")
+    logger.info(
+        f"Scaling layout by {scale:.4f} "
+        f"(zoom={ZOOM}, clip=[{CLIP_LOW_PERCENTILE:.3f}, {CLIP_HIGH_PERCENTILE:.3f}])"
+    )
     return nodes.with_columns(
         ((pl.col("x") - cx_data) * scale + center).alias("px"),
         ((cy_data - pl.col("y")) * scale + center).alias("py"),
