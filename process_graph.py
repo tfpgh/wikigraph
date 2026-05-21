@@ -13,7 +13,7 @@ PAGERANK_PATH = Path("intermediates/pagerank.parquet")
 CLUSTERS_PATH = Path("intermediates/clusters.parquet")
 LAYOUT_PATH = Path("intermediates/layout.parquet")
 
-NODES_ENRICHED_PATH = Path("enriched_nodes.parquet")
+NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
