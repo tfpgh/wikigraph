@@ -5,12 +5,14 @@ import polars as pl
 import skia
 from loguru import logger
 
-INPUT_PATH = Path("enriched_nodes.parquet")
+INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 OUTPUT_PATH = Path("graph_nodes.png")
 
 IMAGE_SIZE = 10_000
 PADDING = 100
 MIN_PIXEL_RADIUS = 0.5
+
+ZOOM = 1.0
 
 BACKGROUND_COLOR = skia.Color(0x33, 0x33, 0x33)
 COLOR_SATURATION = 0.9
@@ -29,20 +31,19 @@ def scale_nodes(nodes: pl.DataFrame) -> pl.DataFrame:
     min_y = float(nodes["y"].min())
     max_y = float(nodes["y"].max())
 
-    width = max_x - min_x
-    height = max_y - min_y
-    extent = max(width, height)
+    extent = max(max_x - min_x, max_y - min_y)
     if extent <= 0:
         raise ValueError("Layout has no spatial extent")
 
-    scale = (IMAGE_SIZE - PADDING * 2) / extent
-    offset_x = (IMAGE_SIZE - width * scale) / 2
-    offset_y = (IMAGE_SIZE - height * scale) / 2
+    scale = ZOOM * (IMAGE_SIZE - PADDING * 2) / extent
+    cx_data = (min_x + max_x) / 2
+    cy_data = (min_y + max_y) / 2
+    center = IMAGE_SIZE / 2
 
-    logger.info(f"Scaling layout by {scale:.4f}")
+    logger.info(f"Scaling layout by {scale:.4f} (zoom={ZOOM})")
     return nodes.with_columns(
-        ((pl.col("x") - min_x) * scale + offset_x).alias("px"),
-        ((max_y - pl.col("y")) * scale + offset_y).alias("py"),
+        ((pl.col("x") - cx_data) * scale + center).alias("px"),
+        ((cy_data - pl.col("y")) * scale + center).alias("py"),
         (pl.col("radius") * scale).clip(lower_bound=MIN_PIXEL_RADIUS).alias("pr"),
     )
 
