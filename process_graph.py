@@ -17,7 +17,7 @@ NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
-PAGERANK_RADIUS_EXPONENT = 0.5
+PAGERANK_RADIUS_EXPONENT = 0.8
 TARGET_NODE_FILL = 0.002
 
 # Top N largest clusters get distinct palette colors
