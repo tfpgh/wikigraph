@@ -111,7 +111,7 @@ def compute_layout() -> None:
     logger.info("Running ForceAtlas2 (pass 1: rough layout)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=1000,
+        max_iter=700,
         scaling_ratio=5.0,
         gravity=1.0,
         strong_gravity_mode=False,
@@ -141,20 +141,20 @@ def compute_layout() -> None:
     logger.info("Running ForceAtlas2 (pass 2: overlap cleanup)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=200,
+        max_iter=1000,
         pos_list=pos,
         scaling_ratio=5.0,
         gravity=1.0,
         strong_gravity_mode=False,
         lin_log_mode=False,
         edge_weight_influence=1.0,
-        jitter_tolerance=0.1,
+        jitter_tolerance=0.05,
         barnes_hut_optimize=True,
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
         prevent_overlapping=True,
         vertex_radius=vertex_radius,
-        overlap_scaling_ratio=50.0,
+        overlap_scaling_ratio=100.0,
         verbose=True,
     )
 

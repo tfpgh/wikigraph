@@ -13,3 +13,5 @@
 
 
 uv run process_graph.py
+
+uv run render_graph.py
