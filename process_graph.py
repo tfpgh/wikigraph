@@ -17,11 +17,8 @@ NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
-# Fraction of the WORLD_EXTENT² canvas covered by node disks. Since
-# Σ pagerank = 1, r = c·√pagerank gives Σπr² = πc², so
-# c = WORLD_EXTENT · √(fill / π).
+PAGERANK_RADIUS_EXPONENT = 0.5
 TARGET_NODE_FILL = 0.002
-RADIUS_COEFFICIENT = WORLD_EXTENT * math.sqrt(TARGET_NODE_FILL / math.pi)
 
 # Top N largest clusters get distinct palette colors
 TOP_N_CLUSTERS = 40
@@ -99,10 +96,21 @@ def compute_layout() -> None:
     edges_df = cudf.read_parquet(EDGES_INPUT_PATH)
     pagerank_df = cudf.read_parquet(PAGERANK_PATH)
 
+    pr_pow_sum = float(
+        (pagerank_df["pagerank"] ** (2 * PAGERANK_RADIUS_EXPONENT)).sum()
+    )
+    radius_coefficient = WORLD_EXTENT * math.sqrt(
+        TARGET_NODE_FILL / (math.pi * pr_pow_sum)
+    )
+    logger.info(
+        f"Radius: r = {radius_coefficient:.2f} · pagerank^{PAGERANK_RADIUS_EXPONENT} "
+        f"(target fill {TARGET_NODE_FILL:.4f})"
+    )
+
     # World-space target radii. Converted into layout space after pass 1
     # and kept there through pass 2 and the parquet write.
     vertex_radius = pagerank_df.rename(columns={"id": "vertex"}).assign(
-        radius=lambda d: d["pagerank"] ** 0.5 * RADIUS_COEFFICIENT
+        radius=lambda d: d["pagerank"] ** PAGERANK_RADIUS_EXPONENT * radius_coefficient
     )[["vertex", "radius"]]
 
     G = cugraph.Graph(directed=False)
@@ -111,7 +119,7 @@ def compute_layout() -> None:
     logger.info("Running ForceAtlas2 (pass 1: rough layout)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=2500,
+        max_iter=2000,
         scaling_ratio=5.0,
         gravity=1.0,
         strong_gravity_mode=False,
@@ -142,7 +150,7 @@ def compute_layout() -> None:
     logger.info("Running initial overlap pass (300 iters)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=300,
+        max_iter=500,
         pos_list=pos,
         scaling_ratio=5.0,
         gravity=1.0,
@@ -155,30 +163,23 @@ def compute_layout() -> None:
         outbound_attraction_distribution=True,
         prevent_overlapping=True,
         vertex_radius=vertex_radius,
-        overlap_scaling_ratio=20.0,
+        overlap_scaling_ratio=40.0,
         verbose=True,
     )
 
     for jitter_tolerance in [
-        0.03,
         0.01,
         0.005,
-        0.001,
         0.0005,
-        0.0001,
         0.00005,
-        0.00001,
         0.000005,
         0.000001,
-        0.0000005,
         0.0000001,
-        0.00000005,
-        0.00000001,
     ]:
         logger.info(f"Running 50 iter overlap pass with jt={jitter_tolerance}")
         pos = cugraph.force_atlas2(
             G,
-            max_iter=50,
+            max_iter=100,
             pos_list=pos,
             scaling_ratio=5.0,
             gravity=1.0,
