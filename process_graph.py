@@ -69,7 +69,12 @@ def compute_clusters() -> None:
     edges_df = cudf.read_parquet(EDGES_INPUT_PATH)
 
     G = cugraph.Graph(directed=False)
-    G.from_cudf_edgelist(edges_df, source="src", destination="dst")
+    G.from_cudf_edgelist(
+        edges_df,
+        source="src",
+        destination="dst",
+        store_transposed=True,
+    )
 
     partitions, modularity = cugraph.leiden(G, resolution=0.7)
     partitions = partitions.rename(columns={"vertex": "id"})
