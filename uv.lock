@@ -1280,6 +1280,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pybind11"
+version = "3.0.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/f0/35145a3c3baffeef55d4b8324caa33abaa8fa56ab345ecd4b2211d09163e/pybind11-3.0.4.tar.gz", hash = "sha256:3286b59c8a774b9ee650169302dd5a4eedc30a8617905a0560dd8ee44775130c", size = 589533, upload-time = "2026-04-19T03:08:15.925Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/06/c3a23c9a0263b136c519f033a58d4641e73065fefc7754e9667ec206d992/pybind11-3.0.4-py3-none-any.whl", hash = "sha256:961720ee652da51d531b7b2451a6bd2bc042b0106e6d9baa48ecb7d58034ce63", size = 314166, upload-time = "2026-04-19T03:08:14.091Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1462,6 +1471,29 @@ wheels = [
 ]
 
 [[package]]
+name = "skia-python"
+version = "144.0.post2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pybind11" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/ee/5521e4f3c21e0a3629d7c889f75ccdc5083e6a92ff6eeab1494a14bd88f2/skia_python-144.0.post2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:904020d6e1aa144e0d1cede5e25b5285d01183ab05e714a6143ac64792772c5b", size = 12025810, upload-time = "2026-03-19T22:21:47.959Z" },
+    { url = "https://files.pythonhosted.org/packages/77/18/e83f7a7e93ed6f24617fcbd8c867dc6746b800e3cdf84f0a735ca015ef2f/skia_python-144.0.post2-cp314-cp314-macosx_11_0_x86_64.whl", hash = "sha256:23a736a877d65e4199680ca2a5a58d8df2e0e4362793d8b03a5d90536f39ccf8", size = 12205269, upload-time = "2026-03-19T22:21:49.975Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/34/31cfc614c84b2dea5f4c25e5ee834e1375002d331a564926a11d90bb489e/skia_python-144.0.post2-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:f2520b34106d3d0d275191c8913ab861372b8bced689cedebbee2df2ff49905c", size = 13937050, upload-time = "2026-03-19T22:21:52.226Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/c9/6dc194a1387002da0b0492ed75ea61cdf94b177b7fc49e0d8f00e72335a2/skia_python-144.0.post2-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:2d97991ecd1fc22606e7e6aa4ab1f1951c9c9b7409f39da346e1788eabc44d7e", size = 14391905, upload-time = "2026-03-19T22:21:54.406Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/cf/1b9775332ef12d9778057d9547a41c82d9684b1152d857edb3a22580700a/skia_python-144.0.post2-cp314-cp314-win_amd64.whl", hash = "sha256:44df4ccc65ea8c288a43694ec25cdbd13e18013b48425ff822ad2de09c168a4d", size = 11260774, upload-time = "2026-03-19T22:21:57.327Z" },
+    { url = "https://files.pythonhosted.org/packages/67/da/fcf8d9dc87740c5b2e2588721717f64d5abc666993b992223b16f34161ba/skia_python-144.0.post2-cp314-cp314-win_arm64.whl", hash = "sha256:de848e3f384a70251b02fad5a31f64c9ef72866d0cbd3728ef97aa355ee01a1d", size = 10840101, upload-time = "2026-03-19T22:21:59.489Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/05/449b2bdbae3835c30585857975a684c709110b29ff49c4021dc4dce2da46/skia_python-144.0.post2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:c24a6b67c912ca49582bf66d73e325ec0a4085e70e4c659c72146fa1d3be48be", size = 12289885, upload-time = "2026-03-19T22:22:01.415Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/26/0d42a3992bea0c8b0cde4047ac05c03b87d50777826d277931fe5341ce16/skia_python-144.0.post2-cp314-cp314t-macosx_11_0_x86_64.whl", hash = "sha256:08523720c5bd3b36ba0e36dee14f4a7911c23256a527ad3b73e1521813bc649d", size = 12348560, upload-time = "2026-03-19T22:22:03.68Z" },
+    { url = "https://files.pythonhosted.org/packages/56/ab/f7e1f107f99db0fb88f621a1607f5ae65cd9e81cffcdd2246d76dfad3ec5/skia_python-144.0.post2-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:76281944d4db84b9e9968224462ccc5714810d3e29e5555486c73be515408602", size = 13929098, upload-time = "2026-03-19T22:22:06.02Z" },
+    { url = "https://files.pythonhosted.org/packages/30/63/966d2237d113155adce1f2c53acb21e136826086aa1acdb9d30d1245eeb0/skia_python-144.0.post2-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:416cf18cfba129967cc21aeb7eaa934c413e5dc977f753e5e1ffa27546d21e14", size = 14391812, upload-time = "2026-03-19T22:22:08.382Z" },
+    { url = "https://files.pythonhosted.org/packages/72/0d/c89d170436881da8a36df78e37a99d73c72b47ac4331a37a5a4e1ac919b7/skia_python-144.0.post2-cp314-cp314t-win_amd64.whl", hash = "sha256:df7fc6d3b713debf8b099d7a1e9888d855ea898f9f02bac3bf0ed73c0a184473", size = 11531971, upload-time = "2026-03-19T22:22:10.564Z" },
+    { url = "https://files.pythonhosted.org/packages/08/5d/97ad2d5379feb5cda6b4040b6b8f5a3bd18d01eaad1bb24478fea2bf704b/skia_python-144.0.post2-cp314-cp314t-win_arm64.whl", hash = "sha256:214644901fa5ad77edd82ca3b2c4fb6106196d0e323d5cae982cc5fe0a05b6a6", size = 10931677, upload-time = "2026-03-19T22:22:12.806Z" },
+]
+
+[[package]]
 name = "sortedcontainers"
 version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1560,6 +1592,7 @@ dependencies = [
     { name = "loguru" },
     { name = "matplotlib" },
     { name = "polars" },
+    { name = "skia-python" },
     { name = "tqdm" },
 ]
 
@@ -1575,6 +1608,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "polars", specifier = ">=1.40.1" },
+    { name = "skia-python", specifier = ">=144.0.post2" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
 provides-extras = ["cuda13"]

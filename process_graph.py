@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import cudf
@@ -15,6 +16,12 @@ LAYOUT_PATH = Path("intermediates/layout.parquet")
 NODES_ENRICHED_PATH = Path("enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
+
+# Fraction of the WORLD_EXTENT² canvas covered by node disks. Since
+# Σ pagerank = 1, r = c·√pagerank gives Σπr² = πc², so
+# c = WORLD_EXTENT · √(fill / π).
+TARGET_NODE_FILL = 0.02
+RADIUS_COEFFICIENT = WORLD_EXTENT * math.sqrt(TARGET_NODE_FILL / math.pi)
 
 # Top N largest clusters get distinct palette colors
 TOP_N_CLUSTERS = 40
@@ -78,26 +85,34 @@ def compute_clusters() -> None:
 
 
 def compute_layout() -> None:
-    """Run ForceAtlas2 on the undirected graph."""
+    """Run a two-pass ForceAtlas2 on the undirected graph.
+
+    Pass 1 finds the natural layout; pass 2 re-runs from that position with
+    overlap prevention enabled. Radii are computed in world coordinates from
+    PageRank, converted into pass-1's layout space, then carried through pass 2
+    so they remain consistent with the final positions.
+    """
     if LAYOUT_PATH.exists():
         logger.info("Layout already computed, skipping")
         return
 
-    logger.info("Running ForceAtlas2")
     edges_df = cudf.read_parquet(EDGES_INPUT_PATH)
-
     pagerank_df = cudf.read_parquet(PAGERANK_PATH)
+
+    # World-space target radii. Converted into layout space after pass 1
+    # and kept there through pass 2 and the parquet write.
     vertex_radius = pagerank_df.rename(columns={"id": "vertex"}).assign(
-        radius=lambda d: d["pagerank"] ** 0.5 * 100
+        radius=lambda d: d["pagerank"] ** 0.5 * RADIUS_COEFFICIENT
     )[["vertex", "radius"]]
 
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
+    logger.info("Running ForceAtlas2 (pass 1: rough layout)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=750,
-        scaling_ratio=2.0,
+        max_iter=1000,
+        scaling_ratio=5.0,
         gravity=1.0,
         strong_gravity_mode=False,
         lin_log_mode=False,
@@ -112,7 +127,6 @@ def compute_layout() -> None:
 
     pos_x = pos["x"]
     pos_y = pos["y"]
-
     assert pos_x is not None and pos_y is not None
 
     cx = float(pos_x.median())
@@ -121,46 +135,50 @@ def compute_layout() -> None:
         float((pos_x - cx).abs().max()),
         float((pos_y - cy).abs().max()),
     )
-    scale = (WORLD_EXTENT / 2) / max_abs
-    vertex_radius = vertex_radius.assign(radius=lambda d: d["radius"] / scale)
+    scale_1 = (WORLD_EXTENT / 2) / max_abs
+    vertex_radius = vertex_radius.assign(radius=lambda d: d["radius"] / scale_1)
 
-    logger.info("Running ForceAtlas2 overlap cleanup")
+    logger.info("Running ForceAtlas2 (pass 2: overlap cleanup)")
     pos = cugraph.force_atlas2(
         G,
-        max_iter=50,
+        max_iter=200,
         pos_list=pos,
-        scaling_ratio=2.0,
+        scaling_ratio=5.0,
         gravity=1.0,
         strong_gravity_mode=False,
         lin_log_mode=False,
         edge_weight_influence=1.0,
-        jitter_tolerance=0.05,
+        jitter_tolerance=0.1,
         barnes_hut_optimize=True,
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
         prevent_overlapping=True,
         vertex_radius=vertex_radius,
-        overlap_scaling_ratio=1.0,
+        overlap_scaling_ratio=50.0,
         verbose=True,
-    ).rename(columns={"vertex": "id"})
+    )
 
     pos_x = pos["x"]
     pos_y = pos["y"]
-
     assert pos_x is not None and pos_y is not None
 
     logger.info(
         f"Raw layout extents: "
         f"x: [{float(pos_x.min()):.1f}, {float(pos_x.max()):.1f}], "
-        f"y:  [{float(pos_y.min()):.1f}, {float(pos_y.max()):.1f}]"
+        f"y: [{float(pos_y.min()):.1f}, {float(pos_y.max()):.1f}]"
     )
 
+    pos = pos.merge(vertex_radius, on="vertex").rename(columns={"vertex": "id"})
     pos.to_parquet(LAYOUT_PATH, compression="zstd")
     logger.success(f"Wrote layout to {LAYOUT_PATH}")
 
 
-def normalize_coordinates(layout: pl.DataFrame) -> pl.DataFrame:
-    """Center the layout on the median and scale uniformly to fit WORLD_EXTENT."""
+def normalize_layout(layout: pl.DataFrame) -> pl.DataFrame:
+    """Center and scale x, y, and radius into the WORLD_EXTENT canonical space.
+
+    The same scale factor is applied to all three columns so the radii used
+    for overlap prevention stay consistent with the final positions.
+    """
     cx = float(layout["x"].median())  # pyright: ignore[reportArgumentType]
     cy = float(layout["y"].median())  # pyright: ignore[reportArgumentType]
     centered = layout.with_columns(
@@ -174,13 +192,14 @@ def normalize_coordinates(layout: pl.DataFrame) -> pl.DataFrame:
     )
     scale = (WORLD_EXTENT / 2) / max_abs
     logger.info(
-        f"Centering at ({cx:.2f}, {cy:.2f}), scaling by {scale:.4f} "
+        f"Centering at ({cx:.2f}, {cy:.2f}), scaling x/y/radius by {scale:.4f} "
         f"to fit WORLD_EXTENT={WORLD_EXTENT}"
     )
 
     return centered.with_columns(
         (pl.col("x") * scale).alias("x"),
         (pl.col("y") * scale).alias("y"),
+        (pl.col("radius") * scale).alias("radius"),
     )
 
 
@@ -211,7 +230,7 @@ def merge_and_write() -> None:
     clusters = pl.read_parquet(CLUSTERS_PATH)
     layout = pl.read_parquet(LAYOUT_PATH)
 
-    layout = normalize_coordinates(layout)
+    layout = normalize_layout(layout)
     clusters = assign_color_indices(clusters)
 
     enriched = (
