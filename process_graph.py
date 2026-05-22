@@ -20,6 +20,8 @@ WORLD_EXTENT = 2**16
 PAGERANK_RADIUS_EXPONENT = 0.42
 TARGET_NODE_FILL = 0.0005
 
+LAYOUT_RADIUS_INFLATION = 1.25
+
 
 def compute_pagerank() -> None:
     """Compute PageRank on the directed graph.
@@ -146,7 +148,11 @@ def compute_layout() -> None:
         float((pos_y - cy).abs().max()),
     )
     scale_1 = (WORLD_EXTENT / 2) / max_abs
+
     vertex_radius = vertex_radius.assign(radius=lambda d: d["radius"] / scale_1)
+    vertex_radius_padded = vertex_radius.assign(
+        radius=lambda d: d["radius"] * LAYOUT_RADIUS_INFLATION
+    )
 
     logger.info("Running ForceAtlas2 (pass 2: overlap cleanup)")
     logger.info("Running initial overlap pass (300 iters)")
@@ -164,7 +170,7 @@ def compute_layout() -> None:
         barnes_hut_theta=0.5,
         outbound_attraction_distribution=True,
         prevent_overlapping=True,
-        vertex_radius=vertex_radius,
+        vertex_radius=vertex_radius_padded,
         overlap_scaling_ratio=40.0,
         verbose=True,
     )
@@ -193,7 +199,7 @@ def compute_layout() -> None:
             barnes_hut_theta=0.5,
             outbound_attraction_distribution=True,
             prevent_overlapping=True,
-            vertex_radius=vertex_radius,
+            vertex_radius=vertex_radius_padded,
             overlap_scaling_ratio=300.0,
             verbose=True,
         )
