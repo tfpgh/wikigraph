@@ -11,7 +11,7 @@ dependencies = [
     "numpy>=2.4.6",
     "pillow>=12.2.0",
     "pmtiles>=3.7.0",
-    "polars>=1.40.1",
+    "polars[rt64]>=1.40.1",
     "skia-python>=144.0.post2",
     "tqdm>=4.67.3",
 ]
