@@ -251,7 +251,7 @@ def build_parent_level(
         blobs = [children.get((2 * px + dx, 2 * py + dy)) for dx, dy in CHILD_OFFSETS]
         return delayed(build_parent_tile)(px, py, *blobs)
 
-    results = Parallel(n_jobs=-1, return_as="generator_unordered", backend="loky")(
+    results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         task(px, py) for px, py in parent_coords
     )
     parents: dict[tuple[int, int], bytes] = {}
@@ -321,7 +321,7 @@ if __name__ == "__main__":
     pyramid: dict[int, dict[tuple[int, int], bytes]] = {}
 
     logger.info(f"Rendering z={max_z} (max zoom)")
-    results = Parallel(n_jobs=-1, return_as="generator_unordered", backend="loky")(
+    results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         delayed(render_max_tile)(tx, ty, max_z, xs, ys, rs, reds, greens, blues)
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
