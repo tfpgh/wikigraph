@@ -14,6 +14,7 @@ from pmtiles.writer import Writer
 from tqdm import tqdm
 
 NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
+EDGES_INPUT_PATH = Path("intermediates/extracted_edges.parquet")
 
 PALETTE_OUTPUT_PATH = Path("intermediates/cluster_palette.parquet")
 TILES_OUTPUT_PATH = Path("intermediates/graph_tiles.pmtiles")
@@ -23,6 +24,9 @@ TILE_SIZE = 256
 
 MIN_NODE_TARGET_PX = 1.0
 RADIUS_PERCENTILE_FOR_MAX_Z = 0.001
+
+EDGE_ALPHA = 0.2
+EDGE_STROKE_WIDTH = 1.0
 
 GOLDEN_RATIO_CONJUGATE = 0.618033988749895
 COLOR_SATURATION = 0.9
@@ -108,6 +112,118 @@ def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
     )
 
 
+def enrich_edges(edges: pl.DataFrame, nodes_with_color: pl.DataFrame) -> pl.DataFrame:
+    """Attach source/target positions and the target's cluster color to each edge.
+
+    Self-loops are dropped. Edges whose endpoints aren't in nodes_with_color
+    (orphans / filtered redirects) fall out via inner joins.
+    """
+    src = nodes_with_color.select(
+        pl.col("id").alias("src"),
+        pl.col("x").alias("sx"),
+        pl.col("y").alias("sy"),
+    )
+    dst = nodes_with_color.select(
+        pl.col("id").alias("dst"),
+        pl.col("x").alias("dx"),
+        pl.col("y").alias("dy"),
+        "r",
+        "g",
+        "b",
+    )
+    return (
+        edges.filter(pl.col("src") != pl.col("dst"))
+        .join(src, on="src", how="inner")
+        .join(dst, on="dst", how="inner")
+        .select("sx", "sy", "dx", "dy", "r", "g", "b")
+    )
+
+
+def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
+    """Group edges by every z=MAX tile their line segment crosses.
+
+    Uses a 2x-oversampled DDA-style traversal: sample the parametric line at
+    n_steps = 2 * max(|dtx|, |dty|) + 1 points and floor each to a tile coord.
+    Dedupe per (edge, tile). Bbox-explode would overshoot diagonals by orders
+    of magnitude — DDA stays proportional to the line length in tiles.
+    """
+    tile_w = WORLD_EXTENT / (2**max_z)
+    n_axis = 2**max_z
+    half = WORLD_EXTENT / 2
+
+    with_endpoints = (
+        edges.with_row_index("edge_id")
+        .with_columns(
+            ((pl.col("sx") + half) / tile_w).floor().cast(pl.Int32).alias("src_tx"),
+            ((pl.col("sy") + half) / tile_w).floor().cast(pl.Int32).alias("src_ty"),
+            ((pl.col("dx") + half) / tile_w).floor().cast(pl.Int32).alias("dst_tx"),
+            ((pl.col("dy") + half) / tile_w).floor().cast(pl.Int32).alias("dst_ty"),
+        )
+        .with_columns(
+            (
+                pl.max_horizontal(
+                    (pl.col("src_tx") - pl.col("dst_tx")).abs(),
+                    (pl.col("src_ty") - pl.col("dst_ty")).abs(),
+                )
+                * 2
+                + 1
+            )
+            .cast(pl.Int32)
+            .alias("n_steps")
+        )
+    )
+
+    exploded = (
+        with_endpoints.with_columns(
+            pl.int_ranges(0, pl.col("n_steps") + 1).alias("step")
+        )
+        .explode("step")
+        .with_columns(
+            (
+                pl.col("step").cast(pl.Float64) / pl.col("n_steps").cast(pl.Float64)
+            ).alias("t")
+        )
+        .with_columns(
+            (
+                (pl.col("sx") + pl.col("t") * (pl.col("dx") - pl.col("sx")) + half)
+                / tile_w
+            )
+            .floor()
+            .cast(pl.Int32)
+            .alias("tx"),
+            (
+                (pl.col("sy") + pl.col("t") * (pl.col("dy") - pl.col("sy")) + half)
+                / tile_w
+            )
+            .floor()
+            .cast(pl.Int32)
+            .alias("ty"),
+        )
+        .filter(
+            (pl.col("tx") >= 0)
+            & (pl.col("tx") < n_axis)
+            & (pl.col("ty") >= 0)
+            & (pl.col("ty") < n_axis)
+        )
+        .group_by(["edge_id", "tx", "ty"], maintain_order=False)
+        .agg(
+            pl.first("sx"),
+            pl.first("sy"),
+            pl.first("dx"),
+            pl.first("dy"),
+            pl.first("r").alias("er"),
+            pl.first("g").alias("eg"),
+            pl.first("b").alias("eb"),
+        )
+        .select(["tx", "ty", "sx", "sy", "dx", "dy", "er", "eg", "eb"])
+    )
+    logger.info(f"Bucketed {len(edges):,} edges into {len(exploded):,} tile-edge rows")
+
+    return exploded.group_by(["tx", "ty"], maintain_order=False).agg(
+        "sx", "sy", "dx", "dy", "er", "eg", "eb"
+    )
+
+
 def encode_webp_lossless(arr: np.ndarray) -> bytes:
     """Encode an RGBA (straight alpha) array to lossless WebP bytes."""
     buf = io.BytesIO()
@@ -122,23 +238,31 @@ def decode_webp(data: bytes) -> np.ndarray:
     return np.array(PILImage.open(io.BytesIO(data)).convert("RGBA"))
 
 
+NodeData = tuple[list[float], list[float], list[float], list[int], list[int], list[int]]
+EdgeData = tuple[
+    list[float],
+    list[float],
+    list[float],
+    list[float],
+    list[int],
+    list[int],
+    list[int],
+]
+
+
 def render_max_tile(
     tx: int,
     ty: int,
     max_z: int,
-    xs: list[float],
-    ys: list[float],
-    radii: list[float],
-    reds: list[int],
-    greens: list[int],
-    blues: list[int],
+    node_data: NodeData | None,
+    edge_data: EdgeData | None,
 ) -> tuple[int, int, bytes]:
     """Render one z=MAX tile to lossless WebP bytes.
 
-    Nodes are grouped by color in Python (tiles usually contain only a handful
-    of partitions) and drawn as one batched SkPath per color, not per-node.
-    Background is transparent; the frontend composites it onto whatever
-    background it wants, so the alpha curve can be tuned without re-rendering.
+    Edges are drawn first at EDGE_ALPHA behind nodes; nodes opaque on top.
+    Both are grouped by color in Python so we issue one batched SkPath draw
+    per color, not per primitive. Background is transparent — the frontend
+    composites it onto whatever background it wants.
     """
     surface = skia.Surface(TILE_SIZE, TILE_SIZE)
     canvas = surface.getCanvas()
@@ -147,21 +271,49 @@ def render_max_tile(
     ppwu = TILE_SIZE * (2**max_z) / WORLD_EXTENT
     origin_x = tx * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
     origin_y = ty * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
+    edge_alpha_byte = int(EDGE_ALPHA * 255)
 
-    paths: dict[tuple[int, int, int], skia.Path] = {}
-    for x, y, r, red, green, blue in zip(xs, ys, radii, reds, greens, blues):
-        color = (red, green, blue)
-        path = paths.get(color)
-        if path is None:
-            path = skia.Path()
-            paths[color] = path
-        path.addCircle((x - origin_x) * ppwu, (y - origin_y) * ppwu, r * ppwu)
+    if edge_data is not None:
+        sxs, sys, dxs, dys, ereds, egreens, eblues = edge_data
+        edge_paths: dict[tuple[int, int, int], skia.Path] = {}
+        for sx, sy, dx, dy, red, green, blue in zip(
+            sxs, sys, dxs, dys, ereds, egreens, eblues
+        ):
+            color = (red, green, blue)
+            path = edge_paths.get(color)
+            if path is None:
+                path = skia.Path()
+                edge_paths[color] = path
+            path.moveTo((sx - origin_x) * ppwu, (sy - origin_y) * ppwu)
+            path.lineTo((dx - origin_x) * ppwu, (dy - origin_y) * ppwu)
 
-    for (red, green, blue), path in paths.items():
-        canvas.drawPath(
-            path,
-            skia.Paint(AntiAlias=True, Color=skia.Color(red, green, blue)),
-        )
+        for (red, green, blue), path in edge_paths.items():
+            canvas.drawPath(
+                path,
+                skia.Paint(
+                    AntiAlias=True,
+                    Style=skia.Paint.kStroke_Style,
+                    StrokeWidth=EDGE_STROKE_WIDTH,
+                    Color=skia.ColorSetARGB(edge_alpha_byte, red, green, blue),
+                ),
+            )
+
+    if node_data is not None:
+        xs, ys, radii, nreds, ngreens, nblues = node_data
+        node_paths: dict[tuple[int, int, int], skia.Path] = {}
+        for x, y, r, red, green, blue in zip(xs, ys, radii, nreds, ngreens, nblues):
+            color = (red, green, blue)
+            path = node_paths.get(color)
+            if path is None:
+                path = skia.Path()
+                node_paths[color] = path
+            path.addCircle((x - origin_x) * ppwu, (y - origin_y) * ppwu, r * ppwu)
+
+        for (red, green, blue), path in node_paths.items():
+            canvas.drawPath(
+                path,
+                skia.Paint(AntiAlias=True, Color=skia.Color(red, green, blue)),
+            )
 
     image = surface.makeImageSnapshot()
     arr = image.toarray(
@@ -313,21 +465,50 @@ if __name__ == "__main__":
         f"Wrote palette ({len(palette):,} clusters) to {PALETTE_OUTPUT_PATH}"
     )
 
-    bucketed = bucket_nodes_by_tile(
-        nodes.join(palette, on="partition", how="inner"), max_z
+    nodes_with_color = nodes.join(palette, on="partition", how="inner")
+    nodes_bucketed = bucket_nodes_by_tile(nodes_with_color, max_z)
+    logger.info(f"{len(nodes_bucketed):,} z={max_z} tiles contain at least one node")
+
+    edges = pl.read_parquet(EDGES_INPUT_PATH)
+    logger.info(f"Loaded {len(edges):,} edges")
+    edges_enriched = enrich_edges(edges, nodes_with_color)
+    logger.info(
+        f"Enriched edges: {len(edges_enriched):,} after dropping self-loops and orphans"
     )
-    logger.info(f"{len(bucketed):,} z={max_z} tiles contain at least one node")
+    edges_bucketed = bucket_edges_by_tile(edges_enriched, max_z)
+    logger.info(f"{len(edges_bucketed):,} z={max_z} tiles contain at least one edge")
+
+    tiles = nodes_bucketed.join(
+        edges_bucketed, on=["tx", "ty"], how="full", coalesce=True
+    )
+    logger.info(f"{len(tiles):,} z={max_z} tiles total (node ∪ edge)")
 
     pyramid: dict[int, dict[tuple[int, int], bytes]] = {}
 
+    def dispatch_tiles():
+        for row in tiles.iter_rows():
+            tx, ty = row[0], row[1]
+            n_xs = row[2]
+            node_data = (
+                (row[2], row[3], row[4], row[5], row[6], row[7])
+                if n_xs is not None
+                else None
+            )
+            e_sxs = row[8]
+            edge_data = (
+                (row[8], row[9], row[10], row[11], row[12], row[13], row[14])
+                if e_sxs is not None
+                else None
+            )
+            yield delayed(render_max_tile)(tx, ty, max_z, node_data, edge_data)
+
     logger.info(f"Rendering z={max_z} (max zoom)")
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(render_max_tile)(tx, ty, max_z, xs, ys, rs, reds, greens, blues)
-        for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
+        dispatch_tiles()
     )
     pyramid[max_z] = {}
     for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
-        results, total=len(bucketed), desc=f"Rendering z={max_z}", unit=" tiles"
+        results, total=len(tiles), desc=f"Rendering z={max_z}", unit=" tiles"
     ):
         pyramid[max_z][(tx, ty)] = data
     log_layer_summary(max_z, pyramid[max_z])
