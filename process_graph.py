@@ -17,8 +17,8 @@ NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
-PAGERANK_RADIUS_EXPONENT = 0.8
-TARGET_NODE_FILL = 0.002
+PAGERANK_RADIUS_EXPONENT = 0.42
+TARGET_NODE_FILL = 0.0005
 
 # Top N largest clusters get distinct palette colors
 TOP_N_CLUSTERS = 40
@@ -76,7 +76,7 @@ def compute_clusters() -> None:
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
-    partitions, modularity = cugraph.leiden(G, resolution=0.7)
+    partitions, modularity = cugraph.leiden(G, resolution=1.0)
     partitions = partitions.rename(columns={"vertex": "id"})
 
     n_clusters = int(partitions["partition"].nunique())  # pyright: ignore[reportOptionalMemberAccess, reportArgumentType]
