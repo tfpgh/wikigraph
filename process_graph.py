@@ -20,9 +20,6 @@ WORLD_EXTENT = 2**16
 PAGERANK_RADIUS_EXPONENT = 0.42
 TARGET_NODE_FILL = 0.0005
 
-# Top N largest clusters get distinct palette colors
-TOP_N_CLUSTERS = 40
-
 
 def compute_pagerank() -> None:
     """Compute PageRank on the directed graph.
@@ -246,24 +243,6 @@ def normalize_layout(layout: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def assign_color_indices(clusters: pl.DataFrame) -> pl.DataFrame:
-    """Assign palette indices 0..TOP_N_CLUSTERS-1 to the largest clusters."""
-    logger.info("Assigning color indices")
-    top = (
-        clusters.group_by("partition")
-        .len()
-        .sort("len", descending=True)
-        .head(TOP_N_CLUSTERS)
-        .with_row_index("color_index")
-        .with_columns(pl.col("color_index").cast(pl.UInt32))
-        .select(["partition", "color_index"])
-    )
-
-    return clusters.join(top, on="partition", how="left").with_columns(
-        pl.col("color_index").fill_null(TOP_N_CLUSTERS).cast(pl.UInt32)
-    )
-
-
 def merge_and_write() -> None:
     """Join nodes, pagerank, clusters, and layout into the final enriched table."""
     logger.info("Merging into final node table")
@@ -274,7 +253,6 @@ def merge_and_write() -> None:
     layout = pl.read_parquet(LAYOUT_PATH)
 
     layout = normalize_layout(layout)
-    clusters = assign_color_indices(clusters)
 
     enriched = (
         nodes.join(pagerank, on="id", how="inner")
