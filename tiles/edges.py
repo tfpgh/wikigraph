@@ -36,8 +36,9 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
     (the trick used for nodes) over-tags badly for long diagonal edges; this
     walks only the cells the line touches.
 
-    The explode runs on a narrow (edge_idx + endpoints) frame to keep peak
-    memory bounded; per-edge attributes are joined back after the dedupe.
+    The explode runs lazy on a narrow frame and fuses the lerp into the select
+    that drops every carry column right at the widest point — at z=11 on 200M+
+    edges the wide intermediate is what eats memory, not the final rows.
     """
     tile_w = WORLD_EXTENT / (2**max_z)
     n_axis = 2**max_z
@@ -46,12 +47,13 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
     edges_indexed = edges.with_row_index("edge_idx")
 
     walks = (
-        edges_indexed.select(
+        edges_indexed.lazy()
+        .select(
             "edge_idx",
-            ((pl.col("src_x") + half_w) / tile_w).alias("tx0"),
-            ((pl.col("src_y") + half_w) / tile_w).alias("ty0"),
-            ((pl.col("dst_x") + half_w) / tile_w).alias("tx1"),
-            ((pl.col("dst_y") + half_w) / tile_w).alias("ty1"),
+            ((pl.col("src_x") + half_w) / tile_w).cast(pl.Float32).alias("tx0"),
+            ((pl.col("src_y") + half_w) / tile_w).cast(pl.Float32).alias("ty0"),
+            ((pl.col("dst_x") + half_w) / tile_w).cast(pl.Float32).alias("tx1"),
+            ((pl.col("dst_y") + half_w) / tile_w).cast(pl.Float32).alias("ty1"),
         )
         .with_columns(
             (pl.col("tx1") - pl.col("tx0")).alias("dtx"),
@@ -72,20 +74,31 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
             .cast(pl.UInt32)
             .alias("n_samples")
         )
-        .with_columns(pl.int_ranges(0, pl.col("n_samples")).alias("step"))
-        .explode("step")
         .with_columns(
-            (
-                pl.col("step").cast(pl.Float64)
-                / (pl.col("n_samples") - 1).cast(pl.Float64)
-            ).alias("t")
+            pl.int_ranges(0, pl.col("n_samples"), dtype=pl.UInt32).alias("step")
         )
-        .with_columns(
-            (pl.col("tx0") + pl.col("t") * pl.col("dtx"))
+        .explode("step")
+        .select(
+            "edge_idx",
+            (
+                pl.col("tx0")
+                + (
+                    pl.col("step").cast(pl.Float32)
+                    / (pl.col("n_samples") - 1).cast(pl.Float32)
+                )
+                * pl.col("dtx")
+            )
             .floor()
             .cast(pl.Int32)
             .alias("tx"),
-            (pl.col("ty0") + pl.col("t") * pl.col("dty"))
+            (
+                pl.col("ty0")
+                + (
+                    pl.col("step").cast(pl.Float32)
+                    / (pl.col("n_samples") - 1).cast(pl.Float32)
+                )
+                * pl.col("dty")
+            )
             .floor()
             .cast(pl.Int32)
             .alias("ty"),
@@ -96,8 +109,8 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
             & (pl.col("ty") >= 0)
             & (pl.col("ty") < n_axis)
         )
-        .select("edge_idx", "tx", "ty")
         .unique()
+        .collect()
     )
     logger.info(f"Bucketed {len(edges):,} edges into {len(walks):,} tile-edge rows")
 
