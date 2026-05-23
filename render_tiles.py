@@ -27,6 +27,7 @@ RADIUS_PERCENTILE_FOR_MAX_Z = 0.001
 
 EDGE_ALPHA = 0.2
 EDGE_STROKE_WIDTH = 1.0
+EDGES_PER_CHUNK = 5_000_000
 
 GOLDEN_RATIO_CONJUGATE = 0.618033988749895
 COLOR_SATURATION = 0.9
@@ -139,20 +140,17 @@ def enrich_edges(edges: pl.DataFrame, nodes_with_color: pl.DataFrame) -> pl.Data
     )
 
 
-def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
-    """Group edges by every z=MAX tile their line segment crosses.
+def _bucket_edges_chunk(
+    chunk: pl.DataFrame, tile_w: float, n_axis: int, half: float
+) -> pl.DataFrame:
+    """Run the DDA explode/dedupe pipeline on one slice of edges.
 
-    Uses a 2x-oversampled DDA-style traversal: sample the parametric line at
-    n_steps = 2 * max(|dtx|, |dty|) + 1 points and floor each to a tile coord.
-    Dedupe per (edge, tile). Bbox-explode would overshoot diagonals by orders
-    of magnitude — DDA stays proportional to the line length in tiles.
+    Returns long-form tile-edge rows (one per chunk-edge × tile pair) with
+    columns: tx, ty, sx, sy, dx, dy, er, eg, eb. The chunk-local edge id used
+    for dedup is dropped from the output so chunks can concat cleanly.
     """
-    tile_w = WORLD_EXTENT / (2**max_z)
-    n_axis = 2**max_z
-    half = WORLD_EXTENT / 2
-
-    with_endpoints = (
-        edges.with_row_index("edge_id")
+    return (
+        chunk.with_row_index("cid")
         .with_columns(
             ((pl.col("sx") + half) / tile_w).floor().cast(pl.Int32).alias("src_tx"),
             ((pl.col("sy") + half) / tile_w).floor().cast(pl.Int32).alias("src_ty"),
@@ -171,12 +169,10 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
             .cast(pl.Int32)
             .alias("n_steps")
         )
-    )
-
-    exploded = (
-        with_endpoints.with_columns(
-            pl.int_ranges(0, pl.col("n_steps") + 1).alias("step")
-        )
+        # Drop endpoint-tile columns before exploding — they'd otherwise be
+        # duplicated n_steps times per edge and blow up the intermediate.
+        .select("cid", "sx", "sy", "dx", "dy", "r", "g", "b", "n_steps")
+        .with_columns(pl.int_ranges(0, pl.col("n_steps") + 1).alias("step"))
         .explode("step")
         .with_columns(
             (
@@ -205,7 +201,7 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
             & (pl.col("ty") >= 0)
             & (pl.col("ty") < n_axis)
         )
-        .group_by(["edge_id", "tx", "ty"], maintain_order=False)
+        .group_by(["cid", "tx", "ty"], maintain_order=False)
         .agg(
             pl.first("sx"),
             pl.first("sy"),
@@ -217,11 +213,68 @@ def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
         )
         .select(["tx", "ty", "sx", "sy", "dx", "dy", "er", "eg", "eb"])
     )
-    logger.info(f"Bucketed {len(edges):,} edges into {len(exploded):,} tile-edge rows")
 
-    return exploded.group_by(["tx", "ty"], maintain_order=False).agg(
-        "sx", "sy", "dx", "dy", "er", "eg", "eb"
+
+def bucket_edges_by_tile(edges: pl.DataFrame, max_z: int) -> pl.DataFrame:
+    """Group edges by every z=MAX tile their line segment crosses.
+
+    Uses a 2x-oversampled DDA-style traversal: sample the parametric line at
+    n_steps = 2 * max(|dtx|, |dty|) + 1 points and floor each to a tile coord.
+    Dedupe per (edge, tile). Bbox-explode would overshoot diagonals by orders
+    of magnitude — DDA stays proportional to line length in tiles.
+
+    Processes edges in chunks of EDGES_PER_CHUNK to cap peak memory: with
+    200M+ edges, the global explode produces billions of intermediate rows
+    that won't fit at once even on a 1.5TB host. Each chunk independently
+    buckets and dedupes; results are concatenated and a single final group_by
+    collapses them into one list-row per tile.
+    """
+    tile_w = WORLD_EXTENT / (2**max_z)
+    n_axis = 2**max_z
+    half = WORLD_EXTENT / 2
+
+    n_chunks = (len(edges) + EDGES_PER_CHUNK - 1) // EDGES_PER_CHUNK
+    logger.info(
+        f"Bucketing {len(edges):,} edges in {n_chunks:,} chunks of {EDGES_PER_CHUNK:,}"
     )
+
+    membership_chunks: list[pl.DataFrame] = []
+    total_rows = 0
+    edges_seen = 0
+    pbar = tqdm(
+        range(0, len(edges), EDGES_PER_CHUNK),
+        total=n_chunks,
+        desc="Bucketing edges",
+        unit=" chunks",
+    )
+    for start in pbar:
+        chunk_result = _bucket_edges_chunk(
+            edges.slice(start, EDGES_PER_CHUNK), tile_w, n_axis, half
+        )
+        total_rows += len(chunk_result)
+        edges_seen = min(start + EDGES_PER_CHUNK, len(edges))
+        membership_chunks.append(chunk_result)
+        pbar.set_postfix(
+            rows=f"{total_rows:,}",
+            tiles_per_edge=f"{total_rows / edges_seen:.2f}",
+        )
+
+    logger.info(
+        f"Bucketed {len(edges):,} edges into {total_rows:,} tile-edge rows "
+        f"(avg {total_rows / len(edges):.2f} tiles/edge)"
+    )
+
+    logger.info("Collapsing chunks into per-tile list rows")
+    result = (
+        pl.concat(membership_chunks)
+        .group_by(["tx", "ty"], maintain_order=False)
+        .agg("sx", "sy", "dx", "dy", "er", "eg", "eb")
+    )
+    logger.info(
+        f"Edge buckets: {len(result):,} tiles "
+        f"(avg {total_rows / max(len(result), 1):.1f} edges/tile)"
+    )
+    return result
 
 
 def encode_webp_lossless(arr: np.ndarray) -> bytes:
@@ -472,10 +525,12 @@ if __name__ == "__main__":
     edges = pl.read_parquet(EDGES_INPUT_PATH)
     logger.info(f"Loaded {len(edges):,} edges")
     edges_enriched = enrich_edges(edges, nodes_with_color)
+    del edges
     logger.info(
         f"Enriched edges: {len(edges_enriched):,} after dropping self-loops and orphans"
     )
     edges_bucketed = bucket_edges_by_tile(edges_enriched, max_z)
+    del edges_enriched
     logger.info(f"{len(edges_bucketed):,} z={max_z} tiles contain at least one edge")
 
     tiles = nodes_bucketed.join(
