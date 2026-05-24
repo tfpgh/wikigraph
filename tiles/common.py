@@ -25,10 +25,12 @@ EDGE_WIDTH_WORLD = 0.5
 P_NORM_ALPHA = 1.3
 
 # Exposure curve baked uniformly into every tile after the pyramid is built.
-# Soft-gain form a' = 1 - (1 - a)^EXPOSURE; identity at 1. Applied once
-# post-build — applying it inside the downsample would compound across levels.
-# Constant (not zoom-ramped) so adjacent pyramid levels get the same curve
-# and tile-swap transitions stay visually continuous.
+# Gamma form a' = a^(1/EXPOSURE); identity at 1, EXPOSURE > 1 lifts dim alpha.
+# Chosen over soft-gain because gamma preserves mid-alpha gradients (anti-
+# aliased edges stay as gradients instead of getting crushed to opaque).
+# Applied once post-build — applying it inside the downsample would compound
+# across levels. Constant (not zoom-ramped) so adjacent pyramid levels get
+# the same curve and tile-swap transitions stay visually continuous.
 EXPOSURE = 1.0
 
 # Max zoom is picked so the small-radius percentile of nodes is at least
@@ -186,13 +188,13 @@ def build_parent_level(
 
 
 def apply_exposure(arr: np.ndarray, exposure: float) -> np.ndarray:
-    """Return a copy of straight-alpha RGBA with the soft-gain curve on alpha.
+    """Return a copy of straight-alpha RGBA with the gamma curve on alpha.
 
-    RGB is untouched; only alpha is lifted in float, then re-quantized.
-    exposure=1.0 is identity.
+    a' = a^(1/exposure). RGB is untouched; only alpha is lifted in float,
+    then re-quantized. exposure=1.0 is identity; exposure > 1 brightens.
     """
     a = arr[..., 3].astype(np.float32) / 255.0
-    a = 1.0 - np.power(1.0 - a, exposure)
+    a = np.power(a, 1.0 / exposure)
     out = arr.copy()
     out[..., 3] = np.rint(a * 255.0).astype(np.uint8)
     return out
