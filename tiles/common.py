@@ -18,9 +18,15 @@ TILE_SIZE = 256
 # later doesn't change the apparent edge thickness at lower zoom levels.
 EDGE_WIDTH_WORLD = 0.5
 
+# p-norm exponent for the alpha channel during 2x2 downsample (p=1 is plain
+# mean). p>1 boosts sparse features so a single bright child pixel survives
+# many levels of downsampling in 8-bit alpha instead of quantizing to zero.
+# Affects alpha only; RGB stays alpha-weighted mean so colors don't shift.
+P_NORM_ALPHA = 4.0
+
 # Max zoom is picked so the small-radius percentile of nodes is at least
 # MIN_NODE_TARGET_PX pixels at that zoom.
-MIN_NODE_TARGET_PX = 10.0
+MIN_NODE_TARGET_PX = 0.5
 RADIUS_PERCENTILE_FOR_MAX_Z = 0.001
 
 
