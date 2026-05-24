@@ -65,8 +65,11 @@ def downsample_4_to_1(
 ) -> np.ndarray:
     """Combine 4 RGBA children into a 256x256 parent via alpha-aware 2x2 box filter.
 
-    Missing children become fully transparent. Premultiply-mean-unpremultiply
-    keeps translucent edges from bleeding background through during the average.
+    Missing children become fully transparent. RGB uses the standard
+    alpha-weighted (premultiplied) mean so translucent edges don't bleed
+    background through during the average. Alpha uses a p-norm with
+    P_NORM_ALPHA so single bright child pixels survive into the 8-bit parent
+    instead of quantizing to zero after a few pyramid levels.
     """
     blank = np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
     combined = np.empty((TILE_SIZE * 2, TILE_SIZE * 2, 4), dtype=np.uint8)
@@ -77,21 +80,32 @@ def downsample_4_to_1(
 
     floats = combined.astype(np.float32)
     alpha = floats[..., 3:4] / 255.0
-    floats[..., :3] *= alpha
 
-    blocks = floats.reshape(TILE_SIZE, 2, TILE_SIZE, 2, 4).mean(axis=(1, 3))
-
-    out_alpha = blocks[..., 3:4]
-    out_alpha_frac = out_alpha / 255.0
+    # RGB: alpha-weighted (premultiplied) mean, unpremultiplied by the mean
+    # alpha. Using the mean (not the p-norm) here keeps the parent's color
+    # faithful to what the children actually showed — only opacity gets boosted.
+    premult_rgb = floats[..., :3] * alpha
+    premult_rgb_blocks = premult_rgb.reshape(TILE_SIZE, 2, TILE_SIZE, 2, 3).mean(
+        axis=(1, 3)
+    )
+    alpha_mean_blocks = alpha.reshape(TILE_SIZE, 2, TILE_SIZE, 2, 1).mean(axis=(1, 3))
     out_rgb = np.where(
-        out_alpha_frac > 0,
-        blocks[..., :3] / np.maximum(out_alpha_frac, 1e-8),
+        alpha_mean_blocks > 0,
+        premult_rgb_blocks / np.maximum(alpha_mean_blocks, 1e-8),
         0,
     )
 
+    # Alpha: p-norm. p=1 reproduces the mean (so a uniform region behaves the
+    # same as before); p>1 bends sparse pixels upward so they survive
+    # quantization through many downsample levels.
+    alpha_p_blocks = (alpha**P_NORM_ALPHA).reshape(
+        TILE_SIZE, 2, TILE_SIZE, 2, 1
+    ).mean(axis=(1, 3))
+    out_alpha = alpha_p_blocks ** (1.0 / P_NORM_ALPHA)
+
     out = np.empty((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
     out[..., :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
-    out[..., 3] = np.clip(out_alpha[..., 0], 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(out_alpha[..., 0] * 255, 0, 255).astype(np.uint8)
     return out
 
 
