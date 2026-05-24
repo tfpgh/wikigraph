@@ -22,7 +22,7 @@ EDGE_WIDTH_WORLD = 0.5
 # mean). p>1 boosts sparse features so a single bright child pixel survives
 # many levels of downsampling in 8-bit alpha instead of quantizing to zero.
 # Affects alpha only; RGB stays alpha-weighted mean so colors don't shift.
-P_NORM_ALPHA = 1.3
+P_NORM_ALPHA = 1.2
 
 # Exposure curve baked uniformly into every tile after the pyramid is built.
 # Gamma form a' = a^(1/EXPOSURE); identity at 1, EXPOSURE > 1 lifts dim alpha.
@@ -31,7 +31,7 @@ P_NORM_ALPHA = 1.3
 # Applied once post-build — applying it inside the downsample would compound
 # across levels. Constant (not zoom-ramped) so adjacent pyramid levels get
 # the same curve and tile-swap transitions stay visually continuous.
-EXPOSURE = 1.0
+EXPOSURE = 2.0
 
 # Max zoom is picked so the small-radius percentile of nodes is at least
 # MIN_NODE_TARGET_PX pixels at that zoom.
