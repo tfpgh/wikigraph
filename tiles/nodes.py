@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import polars as pl
@@ -82,13 +83,21 @@ def render_max_tile(
     reds: list[int],
     greens: list[int],
     blues: list[int],
+    min_render_radius_px: float = 0.0,
 ) -> tuple[int, int, bytes]:
-    """Render one z=MAX tile to lossless WebP bytes.
+    """Render one tile of nodes to lossless WebP bytes.
 
     Nodes are grouped by color in Python (tiles usually contain only a handful
     of partitions) and drawn as one batched SkPath per color, not per-node.
     Background is transparent; the frontend composites it onto whatever
     background it wants, so the alpha curve can be tuned without re-rendering.
+
+    Works at any zoom level (max_z is named for the pyramid use case but is
+    really just "the z of this tile"). When min_render_radius_px > 0, the
+    drawn radius is soft-clamped via sqrt((r*ppwu)^2 + floor^2) so sub-pixel
+    nodes appear at the floor (visible) while large nodes are unaffected, no
+    growth-rate kink. Defaults to 0 so the existing pyramid pipeline (which
+    relies on true sizes at z=MAX) is unchanged.
     """
     surface = skia.Surface(TILE_SIZE, TILE_SIZE)
     canvas = surface.getCanvas()
@@ -97,6 +106,7 @@ def render_max_tile(
     ppwu = TILE_SIZE * (2**max_z) / WORLD_EXTENT
     origin_x = tx * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
     origin_y = ty * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
+    floor_sq = min_render_radius_px * min_render_radius_px
 
     paths: dict[tuple[int, int, int], skia.Path] = {}
     for x, y, r, red, green, blue in zip(xs, ys, radii, reds, greens, blues):
@@ -105,7 +115,9 @@ def render_max_tile(
         if path is None:
             path = skia.Path()
             paths[color] = path
-        path.addCircle((x - origin_x) * ppwu, (y - origin_y) * ppwu, r * ppwu)
+        pixel_r = r * ppwu
+        draw_r = math.sqrt(pixel_r * pixel_r + floor_sq)
+        path.addCircle((x - origin_x) * ppwu, (y - origin_y) * ppwu, draw_r)
 
     for (red, green, blue), path in paths.items():
         canvas.drawPath(

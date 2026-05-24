@@ -32,6 +32,14 @@ from tiles.nodes import (
 from tiles.nodes import render_max_tile as render_node_tile  # generic in z
 from tiles.palette import compute_palette
 
+# Minimum render radius in pixels. Sub-pixel nodes get inflated up to this
+# via the soft-clamp sqrt((r*ppwu)^2 + min^2) so they're visible at low zoom
+# without a per-zoom discontinuity. Higher = brighter low-zoom view but more
+# size inflation at mid zoom. Aim is "negligible effect by ~z=5" for nodes
+# that matter visually; tune down (0.3) if cluster cores look too fat at mid
+# zoom, up (0.7) if z=0 still looks too dim.
+MIN_RENDER_RADIUS_PX = 0.5
+
 
 def render_layer(
     nodes_with_palette: pl.DataFrame, z: int
@@ -51,7 +59,9 @@ def render_layer(
     layer: dict[tuple[int, int], bytes] = {}
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(render_node_tile)(tx, ty, z, xs, ys, rs, reds, greens, blues)
+        delayed(render_node_tile)(
+            tx, ty, z, xs, ys, rs, reds, greens, blues, MIN_RENDER_RADIUS_PX
+        )
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
     for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
