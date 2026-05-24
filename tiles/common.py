@@ -12,7 +12,7 @@ from pmtiles.writer import Writer
 from tqdm import tqdm
 
 WORLD_EXTENT = 2**16
-TILE_SIZE = 256
+TILE_SIZE = 1024
 
 # Edge stroke width in world units. Defined zoom-invariant so changing max_z
 # later doesn't change the apparent edge thickness at lower zoom levels.
@@ -22,11 +22,11 @@ EDGE_WIDTH_WORLD = 0.5
 # mean). p>1 boosts sparse features so a single bright child pixel survives
 # many levels of downsampling in 8-bit alpha instead of quantizing to zero.
 # Affects alpha only; RGB stays alpha-weighted mean so colors don't shift.
-P_NORM_ALPHA = 4.0
+P_NORM_ALPHA = 2.0
 
 # Max zoom is picked so the small-radius percentile of nodes is at least
 # MIN_NODE_TARGET_PX pixels at that zoom.
-MIN_NODE_TARGET_PX = 0.5
+MIN_NODE_TARGET_PX = 1.0
 RADIUS_PERCENTILE_FOR_MAX_Z = 0.001
 
 
@@ -98,9 +98,9 @@ def downsample_4_to_1(
     # Alpha: p-norm. p=1 reproduces the mean (so a uniform region behaves the
     # same as before); p>1 bends sparse pixels upward so they survive
     # quantization through many downsample levels.
-    alpha_p_blocks = (alpha**P_NORM_ALPHA).reshape(
-        TILE_SIZE, 2, TILE_SIZE, 2, 1
-    ).mean(axis=(1, 3))
+    alpha_p_blocks = (
+        (alpha**P_NORM_ALPHA).reshape(TILE_SIZE, 2, TILE_SIZE, 2, 1).mean(axis=(1, 3))
+    )
     out_alpha = alpha_p_blocks ** (1.0 / P_NORM_ALPHA)
 
     out = np.empty((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
