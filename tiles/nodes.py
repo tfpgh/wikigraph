@@ -1,6 +1,6 @@
-import math
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import skia
 from joblib import Parallel, delayed
@@ -83,21 +83,21 @@ def render_max_tile(
     reds: list[int],
     greens: list[int],
     blues: list[int],
-    min_render_radius_px: float = 0.0,
+    alpha_gamma: float = 1.0,
 ) -> tuple[int, int, bytes]:
     """Render one tile of nodes to lossless WebP bytes.
 
     Nodes are grouped by color in Python (tiles usually contain only a handful
     of partitions) and drawn as one batched SkPath per color, not per-node.
     Background is transparent; the frontend composites it onto whatever
-    background it wants, so the alpha curve can be tuned without re-rendering.
+    background it wants.
 
     Works at any zoom level (max_z is named for the pyramid use case but is
-    really just "the z of this tile"). When min_render_radius_px > 0, the
-    drawn radius is soft-clamped via sqrt((r*ppwu)^2 + floor^2) so sub-pixel
-    nodes appear at the floor (visible) while large nodes are unaffected, no
-    growth-rate kink. Defaults to 0 so the existing pyramid pipeline (which
-    relies on true sizes at z=MAX) is unchanged.
+    really just "the z of this tile"). When alpha_gamma > 1, alpha is sRGB-
+    style encoded (stored = α^(1/γ)) before WebP encoding to give 8-bit
+    precision to the dim end of the range instead of quantizing it to zero;
+    the frontend must decode with α^γ before applying any further curve.
+    Defaults to 1.0 (identity) so the existing pyramid pipeline is unchanged.
     """
     surface = skia.Surface(TILE_SIZE, TILE_SIZE)
     canvas = surface.getCanvas()
@@ -106,7 +106,6 @@ def render_max_tile(
     ppwu = TILE_SIZE * (2**max_z) / WORLD_EXTENT
     origin_x = tx * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
     origin_y = ty * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
-    floor_sq = min_render_radius_px * min_render_radius_px
 
     paths: dict[tuple[int, int, int], skia.Path] = {}
     for x, y, r, red, green, blue in zip(xs, ys, radii, reds, greens, blues):
@@ -115,9 +114,7 @@ def render_max_tile(
         if path is None:
             path = skia.Path()
             paths[color] = path
-        pixel_r = r * ppwu
-        draw_r = math.sqrt(pixel_r * pixel_r + floor_sq)
-        path.addCircle((x - origin_x) * ppwu, (y - origin_y) * ppwu, draw_r)
+        path.addCircle((x - origin_x) * ppwu, (y - origin_y) * ppwu, r * ppwu)
 
     for (red, green, blue), path in paths.items():
         canvas.drawPath(
@@ -130,6 +127,11 @@ def render_max_tile(
         colorType=skia.ColorType.kRGBA_8888_ColorType,
         alphaType=skia.AlphaType.kUnpremul_AlphaType,
     )
+    if alpha_gamma != 1.0:
+        arr = arr.copy()  # toarray can return a view of skia's buffer
+        a = arr[..., 3].astype(np.float32) / 255.0
+        a = np.power(a, 1.0 / alpha_gamma)
+        arr[..., 3] = np.rint(a * 255.0).astype(np.uint8)
     return tx, ty, encode_webp_lossless(arr)
 
 

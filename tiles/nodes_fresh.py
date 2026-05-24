@@ -32,13 +32,13 @@ from tiles.nodes import (
 from tiles.nodes import render_max_tile as render_node_tile  # generic in z
 from tiles.palette import compute_palette
 
-# Minimum render radius in pixels. Sub-pixel nodes get inflated up to this
-# via the soft-clamp sqrt((r*ppwu)^2 + min^2) so they're visible at low zoom
-# without a per-zoom discontinuity. Higher = brighter low-zoom view but more
-# size inflation at mid zoom. Aim is "negligible effect by ~z=5" for nodes
-# that matter visually; tune down (0.3) if cluster cores look too fat at mid
-# zoom, up (0.7) if z=0 still looks too dim.
-MIN_RENDER_RADIUS_PX = 0.5
+# sRGB-style gamma encoding on the alpha channel before WebP encoding:
+# stored = α^(1/γ). Concentrates 8-bit precision at the dim end of the range
+# instead of letting low-alpha pixels quantize to zero. Frontend must decode
+# with α^γ before applying any further tone curve. γ=2.0 is a clean sqrt
+# (one GPU instruction to decode); γ=2.2 lifts the very dim end slightly
+# more. Identity at γ=1.0.
+ALPHA_GAMMA = 2.0
 
 
 def render_layer(
@@ -60,7 +60,7 @@ def render_layer(
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         delayed(render_node_tile)(
-            tx, ty, z, xs, ys, rs, reds, greens, blues, MIN_RENDER_RADIUS_PX
+            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA
         )
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
