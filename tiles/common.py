@@ -22,16 +22,14 @@ EDGE_WIDTH_WORLD = 0.5
 # mean). p>1 boosts sparse features so a single bright child pixel survives
 # many levels of downsampling in 8-bit alpha instead of quantizing to zero.
 # Affects alpha only; RGB stays alpha-weighted mean so colors don't shift.
-P_NORM_ALPHA = 1.33
+P_NORM_ALPHA = 1.3
 
-# Exposure curve baked into every tile after the pyramid is built. Soft-gain
-# form a' = 1 - (1 - a)^E lifts dim alpha and saturates bright alpha;
-# identity at E=1. Strength is ramped geometrically by zoom level:
-#   E_z = EXPOSURE ** ((max_z - z) / max_z)
-# so EXPOSURE is the value applied at z=0 and z=max_z gets no change at all
-# (preserves AA on crisp high-zoom circles). Applied once post-build —
-# applying it inside the downsample would compound to a fixed point.
-EXPOSURE = 5.0
+# Exposure curve baked uniformly into every tile after the pyramid is built.
+# Soft-gain form a' = 1 - (1 - a)^EXPOSURE; identity at 1. Applied once
+# post-build — applying it inside the downsample would compound across levels.
+# Constant (not zoom-ramped) so adjacent pyramid levels get the same curve
+# and tile-swap transitions stay visually continuous.
+EXPOSURE = 1.0
 
 # Max zoom is picked so the small-radius percentile of nodes is at least
 # MIN_NODE_TARGET_PX pixels at that zoom.
@@ -66,19 +64,35 @@ def decode_webp(data: bytes) -> np.ndarray:
     return np.array(PILImage.open(io.BytesIO(data)).convert("RGBA"))
 
 
+def _lanczos_resize_float(channel: np.ndarray, size: int) -> np.ndarray:
+    """Resize a single float32 plane to (size, size) with PIL's Lanczos kernel.
+
+    Done per-channel in 'F' mode so we never quantize to uint8 mid-pipeline —
+    the only 8-bit round-trip is at the final WebP encode.
+    """
+    pil = PILImage.fromarray(channel, mode="F")
+    return np.array(
+        pil.resize((size, size), PILImage.Resampling.LANCZOS), dtype=np.float32
+    )
+
+
 def downsample_4_to_1(
     tl: np.ndarray | None,
     tr: np.ndarray | None,
     bl: np.ndarray | None,
     br: np.ndarray | None,
 ) -> np.ndarray:
-    """Combine 4 RGBA children into a 256x256 parent via alpha-aware 2x2 box filter.
+    """Combine 4 RGBA children into one parent tile via alpha-aware Lanczos resize.
 
     Missing children become fully transparent. RGB uses the standard
-    alpha-weighted (premultiplied) mean so translucent edges don't bleed
-    background through during the average. Alpha uses a p-norm with
-    P_NORM_ALPHA so single bright child pixels survive into the 8-bit parent
-    instead of quantizing to zero after a few pyramid levels.
+    premultiplied-Lanczos-then-unpremultiply-by-resized-alpha so translucent
+    edges don't bleed background through. Alpha uses the same p-norm shape
+    as before but with the Lanczos kernel instead of a 2x2 box: lift to
+    alpha**p, Lanczos-resize, clamp negative ringing to zero, take 1/p root.
+
+    Box-mean downsampling produces lumpy, blocky artifacts on circles and
+    edges that survive many pyramid levels; Lanczos preserves smoothness
+    while still letting the p-norm boost sparse single-pixel features.
     """
     blank = np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
     combined = np.empty((TILE_SIZE * 2, TILE_SIZE * 2, 4), dtype=np.uint8)
@@ -88,33 +102,33 @@ def downsample_4_to_1(
     combined[TILE_SIZE:, TILE_SIZE:] = br if br is not None else blank
 
     floats = combined.astype(np.float32)
-    alpha = floats[..., 3:4] / 255.0
+    alpha = floats[..., 3] / 255.0  # (2H, 2W) in [0, 1]
 
-    # RGB: alpha-weighted (premultiplied) mean, unpremultiplied by the mean
-    # alpha. Using the mean (not the p-norm) here keeps the parent's color
-    # faithful to what the children actually showed — only opacity gets boosted.
-    premult_rgb = floats[..., :3] * alpha
-    premult_rgb_blocks = premult_rgb.reshape(TILE_SIZE, 2, TILE_SIZE, 2, 3).mean(
-        axis=(1, 3)
+    # RGB: premultiplied Lanczos per channel, unpremultiplied by the resized
+    # mean alpha. Using the mean (not the p-norm) here keeps the parent's
+    # color faithful to what the children actually showed — only opacity gets
+    # the p-norm boost.
+    premult = floats[..., :3] * alpha[..., None]
+    premult_small = np.stack(
+        [_lanczos_resize_float(premult[..., c], TILE_SIZE) for c in range(3)],
+        axis=-1,
     )
-    alpha_mean_blocks = alpha.reshape(TILE_SIZE, 2, TILE_SIZE, 2, 1).mean(axis=(1, 3))
+    alpha_mean_small = np.maximum(_lanczos_resize_float(alpha, TILE_SIZE), 0.0)
     out_rgb = np.where(
-        alpha_mean_blocks > 0,
-        premult_rgb_blocks / np.maximum(alpha_mean_blocks, 1e-8),
+        alpha_mean_small[..., None] > 0,
+        premult_small / np.maximum(alpha_mean_small[..., None], 1e-8),
         0,
     )
 
-    # Alpha: p-norm. p=1 reproduces the mean (so a uniform region behaves the
-    # same as before); p>1 bends sparse pixels upward so they survive
-    # quantization through many downsample levels.
-    alpha_p_blocks = (
-        (alpha**P_NORM_ALPHA).reshape(TILE_SIZE, 2, TILE_SIZE, 2, 1).mean(axis=(1, 3))
-    )
-    out_alpha = alpha_p_blocks ** (1.0 / P_NORM_ALPHA)
+    # Alpha: Lanczos with p-norm shape. lift -> resize -> clamp -> root.
+    # Lanczos can ring negative around sharp transitions; the clamp before
+    # the fractional root keeps the operation well-defined.
+    alpha_p_small = _lanczos_resize_float(alpha**P_NORM_ALPHA, TILE_SIZE)
+    out_alpha = np.maximum(alpha_p_small, 0.0) ** (1.0 / P_NORM_ALPHA)
 
     out = np.empty((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
     out[..., :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
-    out[..., 3] = np.clip(out_alpha[..., 0] * 255, 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(out_alpha * 255, 0, 255).astype(np.uint8)
     return out
 
 
@@ -191,41 +205,30 @@ def expose_tile(
     return tx, ty, encode_webp_lossless(apply_exposure(decode_webp(blob), exposure))
 
 
-def bake_exposure(
-    pyramid: dict[int, dict[tuple[int, int], bytes]], max_z: int
-) -> None:
-    """Apply a per-zoom-level exposure curve to the finished pyramid, in place.
+def bake_exposure(pyramid: dict[int, dict[tuple[int, int], bytes]], max_z: int) -> None:
+    """Apply the EXPOSURE curve uniformly to every tile in the finished pyramid.
 
-    Strength ramps geometrically from E=1.0 at z=max_z (identity, preserves AA
-    on crisp high-zoom tiles) to E=EXPOSURE at z=0 (full lift on the dim
-    "haze" tiles where there's no AA detail to damage). z=max_z is skipped
-    entirely since the curve is a no-op there.
-
-    Each level is processed in parallel and replaces its layer in place — no
-    level is read for downsampling after this, so each tile is touched once
-    with no compounding.
+    Same E on every zoom level so adjacent levels stay visually consistent at
+    tile-swap boundaries. Runs once after the build loop finishes — no level
+    is read for downsampling after this, so each tile is touched once with no
+    compounding. Each level is processed in parallel.
     """
-    total = sum(len(pyramid[z]) for z in range(max_z + 1) if z != max_z)
-    logger.info(
-        f"Baking exposure (E ramped 1.0 → {EXPOSURE} from z={max_z} down to z=0) "
-        f"into {total:,} tiles"
-    )
+    if abs(EXPOSURE - 1.0) < 1e-6:
+        logger.info(f"EXPOSURE={EXPOSURE} is identity, skipping bake")
+        return
+
+    total = sum(len(layer) for layer in pyramid.values())
+    logger.info(f"Baking exposure (E={EXPOSURE}) into {total:,} tiles")
 
     for z in range(max_z + 1):
-        depth_frac = (max_z - z) / max_z if max_z > 0 else 0.0
-        e_z = EXPOSURE**depth_frac
-        if abs(e_z - 1.0) < 1e-6:
-            logger.info(f"z={z}: E={e_z:.3f} (identity, skipping)")
-            continue
-
         layer = pyramid[z]
         results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-            delayed(expose_tile)(tx, ty, blob, e_z)
+            delayed(expose_tile)(tx, ty, blob, EXPOSURE)
             for (tx, ty), blob in layer.items()
         )
         new_layer: dict[tuple[int, int], bytes] = {}
         for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
-            results, total=len(layer), desc=f"Exposing z={z} (E={e_z:.2f})", unit=" tiles"
+            results, total=len(layer), desc=f"Exposing z={z}", unit=" tiles"
         ):
             new_layer[(tx, ty)] = data
         pyramid[z] = new_layer
