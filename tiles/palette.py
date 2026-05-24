@@ -3,7 +3,7 @@ from colorsys import hsv_to_rgb
 import polars as pl
 
 GOLDEN_RATIO_CONJUGATE = 0.618033988749895
-COLOR_SATURATION = 0.9
+COLOR_SATURATION = 0.75
 COLOR_VALUE = 1.0
 
 

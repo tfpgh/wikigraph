@@ -9,6 +9,7 @@ from tqdm import tqdm
 from tiles.common import (
     TILE_SIZE,
     WORLD_EXTENT,
+    bake_exposure,
     build_parent_level,
     compute_max_zoom,
     encode_webp_lossless,
@@ -168,6 +169,8 @@ if __name__ == "__main__":
         f"Pyramid complete: {pyramid_tiles:,} tiles, "
         f"{pyramid_bytes / 1e9:.2f} GB in memory"
     )
+
+    bake_exposure(pyramid, max_z)
 
     write_pmtiles(pyramid, max_z, NODE_TILES_OUTPUT_PATH)
     logger.success(f"Wrote tile pyramid to {NODE_TILES_OUTPUT_PATH}")

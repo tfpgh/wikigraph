@@ -22,11 +22,18 @@ EDGE_WIDTH_WORLD = 0.5
 # mean). p>1 boosts sparse features so a single bright child pixel survives
 # many levels of downsampling in 8-bit alpha instead of quantizing to zero.
 # Affects alpha only; RGB stays alpha-weighted mean so colors don't shift.
-P_NORM_ALPHA = 2.0
+P_NORM_ALPHA = 1.33
+
+# Per-tile exposure curve baked into every tile after the pyramid is built.
+# Soft-gain form a' = 1 - (1 - a)^EXPOSURE: heavily lifts dim alpha, gently
+# saturates bright alpha, identity at EXPOSURE=1. Applied once after the
+# pyramid is finished — applying it inside the downsample would compound
+# across levels and converge to a meaningless fixed point.
+EXPOSURE = 5.0
 
 # Max zoom is picked so the small-radius percentile of nodes is at least
 # MIN_NODE_TARGET_PX pixels at that zoom.
-MIN_NODE_TARGET_PX = 1.0
+MIN_NODE_TARGET_PX = 0.25
 RADIUS_PERCENTILE_FOR_MAX_Z = 0.001
 
 
@@ -160,6 +167,46 @@ def build_parent_level(
     ):
         parents[(px, py)] = data
     return parents
+
+
+def apply_exposure(arr: np.ndarray) -> np.ndarray:
+    """Return a copy of straight-alpha RGBA with the EXPOSURE curve on alpha.
+
+    RGB is untouched; only alpha is lifted in float, then re-quantized.
+    """
+    a = arr[..., 3].astype(np.float32) / 255.0
+    a = 1.0 - np.power(1.0 - a, EXPOSURE)
+    out = arr.copy()
+    out[..., 3] = np.rint(a * 255.0).astype(np.uint8)
+    return out
+
+
+def expose_tile(tx: int, ty: int, blob: bytes) -> tuple[int, int, bytes]:
+    """Decode a stored tile, apply the exposure curve, re-encode."""
+    return tx, ty, encode_webp_lossless(apply_exposure(decode_webp(blob)))
+
+
+def bake_exposure(pyramid: dict[int, dict[tuple[int, int], bytes]], max_z: int) -> None:
+    """Apply EXPOSURE to every tile in the finished pyramid, in place.
+
+    Runs once after the build loop finishes — no level is read for downsampling
+    after this, so each tile is touched exactly once and no compounding occurs.
+    Each level's tiles are processed in parallel.
+    """
+    total = sum(len(layer) for layer in pyramid.values())
+    logger.info(f"Baking exposure (E={EXPOSURE}) into {total:,} tiles")
+
+    for z in range(max_z + 1):
+        layer = pyramid[z]
+        results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
+            delayed(expose_tile)(tx, ty, blob) for (tx, ty), blob in layer.items()
+        )
+        new_layer: dict[tuple[int, int], bytes] = {}
+        for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
+            results, total=len(layer), desc=f"Exposing z={z}", unit=" tiles"
+        ):
+            new_layer[(tx, ty)] = data
+        pyramid[z] = new_layer
 
 
 def write_pmtiles(
