@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import numpy as np
@@ -10,11 +11,8 @@ from tqdm import tqdm
 from tiles.common import (
     TILE_SIZE,
     WORLD_EXTENT,
-    bake_exposure,
-    build_parent_level,
     compute_max_zoom,
     encode_webp_lossless,
-    log_layer_summary,
     write_pmtiles,
 )
 from tiles.palette import compute_palette
@@ -23,6 +21,14 @@ NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 
 PALETTE_OUTPUT_PATH = Path("intermediates/cluster_palette.parquet")
 NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
+
+# sRGB-style gamma encoding on the alpha channel before WebP encoding:
+# stored = α^(1/γ). Concentrates 8-bit precision at the dim end of the range
+# instead of letting low-alpha pixels quantize to zero. Frontend must decode
+# with α^γ before applying any further tone curve. γ=2.0 is a clean sqrt
+# (one GPU instruction to decode); γ=2.2 lifts the very dim end slightly
+# more. Identity at γ=1.0.
+ALPHA_GAMMA = 2.0
 
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
@@ -73,10 +79,10 @@ def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
     )
 
 
-def render_max_tile(
+def render_node_tile(
     tx: int,
     ty: int,
-    max_z: int,
+    z: int,
     xs: list[float],
     ys: list[float],
     radii: list[float],
@@ -85,27 +91,25 @@ def render_max_tile(
     blues: list[int],
     alpha_gamma: float = 1.0,
 ) -> tuple[int, int, bytes]:
-    """Render one tile of nodes to lossless WebP bytes.
+    """Render one tile of nodes at zoom z to lossless WebP bytes.
 
     Nodes are grouped by color in Python (tiles usually contain only a handful
     of partitions) and drawn as one batched SkPath per color, not per-node.
     Background is transparent; the frontend composites it onto whatever
     background it wants.
 
-    Works at any zoom level (max_z is named for the pyramid use case but is
-    really just "the z of this tile"). When alpha_gamma > 1, alpha is sRGB-
-    style encoded (stored = α^(1/γ)) before WebP encoding to give 8-bit
-    precision to the dim end of the range instead of quantizing it to zero;
-    the frontend must decode with α^γ before applying any further curve.
-    Defaults to 1.0 (identity) so the existing pyramid pipeline is unchanged.
+    When alpha_gamma > 1, alpha is sRGB-style encoded (stored = α^(1/γ)) before
+    WebP encoding to give 8-bit precision to the dim end of the range instead
+    of quantizing it to zero; the frontend must decode with α^γ before applying
+    any further curve.
     """
     surface = skia.Surface(TILE_SIZE, TILE_SIZE)
     canvas = surface.getCanvas()
     canvas.clear(skia.Color4f(0, 0, 0, 0))
 
-    ppwu = TILE_SIZE * (2**max_z) / WORLD_EXTENT
-    origin_x = tx * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
-    origin_y = ty * WORLD_EXTENT / (2**max_z) - WORLD_EXTENT / 2
+    ppwu = TILE_SIZE * (2**z) / WORLD_EXTENT
+    origin_x = tx * WORLD_EXTENT / (2**z) - WORLD_EXTENT / 2
+    origin_y = ty * WORLD_EXTENT / (2**z) - WORLD_EXTENT / 2
 
     paths: dict[tuple[int, int, int], skia.Path] = {}
     for x, y, r, red, green, blue in zip(xs, ys, radii, reds, greens, blues):
@@ -135,8 +139,47 @@ def render_max_tile(
     return tx, ty, encode_webp_lossless(arr)
 
 
+def render_layer(
+    nodes_with_palette: pl.DataFrame, z: int
+) -> dict[tuple[int, int], bytes]:
+    """Bucket nodes into this zoom level's tile grid and render each tile."""
+    t_bucket = time.perf_counter()
+    bucketed = bucket_nodes_by_tile(nodes_with_palette, z)
+    n_tiles = len(bucketed)
+    bucket_s = time.perf_counter() - t_bucket
+
+    if n_tiles == 0:
+        logger.warning(f"z={z}: no tiles contain nodes, skipping")
+        return {}
+
+    logger.info(f"z={z}: bucketed in {bucket_s:.1f}s → rendering {n_tiles:,} tile(s)")
+
+    layer: dict[tuple[int, int], bytes] = {}
+    t_render = time.perf_counter()
+    results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
+        delayed(render_node_tile)(
+            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA
+        )
+        for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
+    )
+    for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
+        results, total=n_tiles, desc=f"Rendering z={z}", unit=" tiles"
+    ):
+        layer[(tx, ty)] = data
+    render_s = time.perf_counter() - t_render
+
+    total_bytes = sum(len(b) for b in layer.values())
+    logger.info(
+        f"z={z}: rendered in {render_s:.1f}s — {n_tiles:,} tiles, "
+        f"{total_bytes / 1e9:.3f} GB (avg {total_bytes / n_tiles / 1024:.1f} KB/tile)"
+    )
+    return layer
+
+
 if __name__ == "__main__":
-    logger.info("Rendering node tiles")
+    logger.info(
+        f"Rendering node tiles fresh at each zoom level → {NODE_TILES_OUTPUT_PATH}"
+    )
 
     nodes = pl.read_parquet(NODES_INPUT_PATH).select(
         ["id", "x", "y", "radius", "partition"]
@@ -151,40 +194,20 @@ if __name__ == "__main__":
         f"Wrote palette ({len(palette):,} clusters) to {PALETTE_OUTPUT_PATH}"
     )
 
-    bucketed = bucket_nodes_by_tile(
-        nodes.join(palette, on="partition", how="inner"), max_z
-    )
-    logger.info(f"{len(bucketed):,} z={max_z} tiles contain at least one node")
+    nodes_with_palette = nodes.join(palette, on="partition", how="inner")
 
     pyramid: dict[int, dict[tuple[int, int], bytes]] = {}
+    t_total = time.perf_counter()
+    for z in range(max_z + 1):
+        pyramid[z] = render_layer(nodes_with_palette, z)
+    total_s = time.perf_counter() - t_total
 
-    logger.info(f"Rendering z={max_z} (max zoom)")
-    results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(render_max_tile)(tx, ty, max_z, xs, ys, rs, reds, greens, blues)
-        for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
-    )
-    pyramid[max_z] = {}
-    for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
-        results, total=len(bucketed), desc=f"Rendering z={max_z}", unit=" tiles"
-    ):
-        pyramid[max_z][(tx, ty)] = data
-    log_layer_summary(max_z, pyramid[max_z])
-
-    logger.info(f"Building pyramid from z={max_z - 1} down to z=0")
-    for z in range(max_z - 1, -1, -1):
-        pyramid[z] = build_parent_level(pyramid[z + 1], z)
-        log_layer_summary(z, pyramid[z])
-
-    pyramid_bytes = sum(
-        sum(len(b) for b in layer.values()) for layer in pyramid.values()
-    )
-    pyramid_tiles = sum(len(layer) for layer in pyramid.values())
+    total_tiles = sum(len(layer) for layer in pyramid.values())
+    total_bytes = sum(sum(len(b) for b in layer.values()) for layer in pyramid.values())
     logger.info(
-        f"Pyramid complete: {pyramid_tiles:,} tiles, "
-        f"{pyramid_bytes / 1e9:.2f} GB in memory"
+        f"All {max_z + 1} levels rendered in {total_s:.1f}s: "
+        f"{total_tiles:,} tiles, {total_bytes / 1e9:.2f} GB in memory"
     )
-
-    bake_exposure(pyramid, max_z)
 
     write_pmtiles(pyramid, max_z, NODE_TILES_OUTPUT_PATH)
     logger.success(f"Wrote tile pyramid to {NODE_TILES_OUTPUT_PATH}")
