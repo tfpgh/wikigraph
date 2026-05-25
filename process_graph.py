@@ -182,7 +182,7 @@ def compute_layout() -> None:
         outbound_attraction_distribution=True,
         prevent_overlapping=True,
         vertex_radius=vertex_radius_padded,
-        overlap_scaling_ratio=40.0,
+        overlap_scaling_ratio=100.0,
         verbose=True,
     )
 
@@ -211,7 +211,7 @@ def compute_layout() -> None:
             outbound_attraction_distribution=True,
             prevent_overlapping=True,
             vertex_radius=vertex_radius_padded,
-            overlap_scaling_ratio=300.0,
+            overlap_scaling_ratio=2000.0,
             verbose=True,
         )
 
