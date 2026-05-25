@@ -147,8 +147,10 @@ def bucket_meta_tiles(records: pl.DataFrame, z: int) -> pl.DataFrame:
     ppwu = TILE_SIZE * (2**z) / WORLD_EXTENT
     visible = records.filter(pl.col("radius") * ppwu >= NODE_META_MIN_PX)
     if visible.is_empty():
-        return visible.clear().select(
-            pl.lit(0).alias("tx"), pl.lit(0).alias("ty"), pl.lit(0).alias("recs")
+        # 0-row frame. (Don't select() only literals onto an empty frame — that
+        # broadcasts them into a phantom 1-row frame.)
+        return pl.DataFrame(
+            schema={"tx": pl.Int32, "ty": pl.Int32, "recs": pl.List(pl.Int64)}
         )
 
     tile_w = WORLD_EXTENT / (2**z)
@@ -233,13 +235,9 @@ def build_layer(records: pl.DataFrame, z: int) -> dict[tuple[int, int], bytes]:
         logger.info(f"z={z}: no nodes above {NODE_META_MIN_PX}px, skipping")
         return {}
 
-    txs = bucketed["tx"].to_list()
-    tys = bucketed["ty"].to_list()
-    recs_col = bucketed["recs"].to_list()
-
     layer: dict[tuple[int, int], bytes] = {}
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(encode_tile)(tx, ty, recs) for tx, ty, recs in zip(txs, tys, recs_col)
+        delayed(encode_tile)(tx, ty, recs) for tx, ty, recs in bucketed.iter_rows()
     )
     for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
         results, total=n_tiles, desc=f"Encoding z={z}", unit=" tiles"
