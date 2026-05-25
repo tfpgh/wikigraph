@@ -17,8 +17,12 @@ NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
-PAGERANK_RADIUS_EXPONENT = 0.42
+PAGERANK_RADIUS_EXPONENT = 0.5
 TARGET_NODE_FILL = 0.0005
+
+# Clamp the bottom RADIUS_FLOOR_PERCENTILE of nodes (by PageRank) up to a single
+# floor radius so the long tail of tiny articles renders at one readable size.
+RADIUS_FLOOR_PERCENTILE = 0.10
 
 LAYOUT_RADIUS_INFLATION = 1.25
 
@@ -75,7 +79,7 @@ def compute_clusters() -> None:
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
-    partitions, modularity = cugraph.leiden(G, resolution=0.4)
+    partitions, modularity = cugraph.leiden(G, resolution=0.45)
     partitions = partitions.rename(columns={"vertex": "id"})
 
     n_clusters = int(partitions["partition"].nunique())  # pyright: ignore[reportOptionalMemberAccess, reportArgumentType]
@@ -100,21 +104,28 @@ def compute_layout() -> None:
     edges_df = cudf.read_parquet(EDGES_INPUT_PATH)
     pagerank_df = cudf.read_parquet(PAGERANK_PATH)
 
-    pr_pow_sum = float(
-        (pagerank_df["pagerank"] ** (2 * PAGERANK_RADIUS_EXPONENT)).sum()
-    )
+    # Floor PageRank at its low percentile so the bottom decile collapses to a
+    # single size. Compute the coefficient on the clamped values so total fill
+    # stays at TARGET_NODE_FILL despite the floor enlarging the small nodes.
+    pr_floor = float(pagerank_df["pagerank"].quantile(RADIUS_FLOOR_PERCENTILE))
+    pr_eff = pagerank_df["pagerank"].clip(lower=pr_floor)
+    pr_pow_sum = float((pr_eff ** (2 * PAGERANK_RADIUS_EXPONENT)).sum())
     radius_coefficient = WORLD_EXTENT * math.sqrt(
         TARGET_NODE_FILL / (math.pi * pr_pow_sum)
     )
     logger.info(
-        f"Radius: r = {radius_coefficient:.2f} · pagerank^{PAGERANK_RADIUS_EXPONENT} "
-        f"(target fill {TARGET_NODE_FILL:.4f})"
+        f"Radius: r = {radius_coefficient:.2f} · "
+        f"max(pagerank, p{RADIUS_FLOOR_PERCENTILE:.0%}={pr_floor:.2e})^"
+        f"{PAGERANK_RADIUS_EXPONENT} (target fill {TARGET_NODE_FILL:.4f})"
     )
 
     # World-space target radii. Converted into layout space after pass 1
     # and kept there through pass 2 and the parquet write.
     vertex_radius = pagerank_df.rename(columns={"id": "vertex"}).assign(
-        radius=lambda d: d["pagerank"] ** PAGERANK_RADIUS_EXPONENT * radius_coefficient
+        radius=lambda d: (
+            d["pagerank"].clip(lower=pr_floor) ** PAGERANK_RADIUS_EXPONENT
+            * radius_coefficient
+        )
     )[["vertex", "radius"]]
 
     G = cugraph.Graph(directed=False)
