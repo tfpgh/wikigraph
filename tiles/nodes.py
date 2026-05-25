@@ -103,7 +103,14 @@ def render_node_tile(
     of quantizing it to zero; the frontend must decode with α^γ before applying
     any further curve.
     """
-    surface = skia.Surface(TILE_SIZE, TILE_SIZE)
+    info = skia.ImageInfo.Make(
+        TILE_SIZE,
+        TILE_SIZE,
+        skia.ColorType.kRGBA_F32_ColorType,
+        skia.AlphaType.kPremul_AlphaType,
+        skia.ColorSpace.MakeSRGB(),
+    )
+    surface = skia.Surface.MakeRaster(info)
     canvas = surface.getCanvas()
     canvas.clear(skia.Color4f(0, 0, 0, 0))
 
@@ -128,14 +135,15 @@ def render_node_tile(
 
     image = surface.makeImageSnapshot()
     arr = image.toarray(
-        colorType=skia.ColorType.kRGBA_8888_ColorType,
+        colorType=skia.ColorType.kRGBA_F32_ColorType,
         alphaType=skia.AlphaType.kUnpremul_AlphaType,
-    )
+    ).copy()
+
     if alpha_gamma != 1.0:
-        arr = arr.copy()  # toarray can return a view of skia's buffer
-        a = arr[..., 3].astype(np.float32) / 255.0
-        a = np.power(a, 1.0 / alpha_gamma)
-        arr[..., 3] = np.rint(a * 255.0).astype(np.uint8)
+        arr[..., 3] = np.power(np.clip(arr[..., 3], 0.0, 1.0), 1.0 / alpha_gamma)
+
+    arr = np.rint(np.clip(arr * 255.0, 0, 255)).astype(np.uint8)
+
     return tx, ty, encode_webp_lossless(arr)
 
 
