@@ -45,8 +45,16 @@ def write_pmtiles(
     pyramid: dict[int, dict[tuple[int, int], bytes]],
     max_z: int,
     path: Path,
+    tile_type: TileType = TileType.WEBP,
+    tile_compression: Compression = Compression.NONE,
 ) -> None:
-    """Pack all zoom levels into a single PMTiles archive on disk."""
+    """Pack all zoom levels into a single PMTiles archive on disk.
+
+    Defaults pack lossless-WebP raster tiles uncompressed (the node/edge
+    pyramids). Pass tile_type=TileType.UNKNOWN with tile_compression=GZIP for
+    the gzipped-JSON metadata archive — the tile bytes must already be gzipped;
+    tile_compression only tells the client how to decode them.
+    """
     total = sum(len(layer) for layer in pyramid.values())
     logger.info(f"Writing {total:,} tiles to {path}")
 
@@ -60,8 +68,8 @@ def write_pmtiles(
 
         writer.finalize(
             {
-                "tile_type": TileType.WEBP,
-                "tile_compression": Compression.NONE,
+                "tile_type": tile_type,
+                "tile_compression": tile_compression,
                 "min_zoom": 0,
                 "max_zoom": max_z,
                 "min_lon_e7": int(-180 * 10**7),  # Just advisory metadata, not used
