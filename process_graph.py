@@ -24,7 +24,7 @@ TARGET_NODE_FILL = 0.0005
 # floor radius so the long tail of tiny articles renders at one readable size.
 RADIUS_FLOOR_PERCENTILE = 0.10
 
-LAYOUT_RADIUS_INFLATION = 1.25
+LAYOUT_RADIUS_INFLATION = 1.3
 
 
 def compute_pagerank() -> None:
