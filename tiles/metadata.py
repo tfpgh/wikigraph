@@ -67,19 +67,16 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
     inn (list[struct]), no, ni — plus radius kept separate for thresholding.
     """
     palette = compute_palette(nodes["partition"])
-    attrs = (
-        nodes.join(palette, on="partition", how="inner")
-        .select(
-            "id",
-            "title",
-            pl.col("x").round(COORD_DECIMALS),
-            pl.col("y").round(COORD_DECIMALS),
-            pl.col("radius").round(COORD_DECIMALS),
-            "pagerank",
-            "r",
-            "g",
-            "b",
-        )
+    attrs = nodes.join(palette, on="partition", how="inner").select(
+        "id",
+        "title",
+        pl.col("x").round(COORD_DECIMALS),
+        pl.col("y").round(COORD_DECIMALS),
+        pl.col("radius").round(COORD_DECIMALS),
+        "pagerank",
+        "r",
+        "g",
+        "b",
     )
 
     # Outgoing: for each src, its top-K dst neighbors (target pos + target color).
@@ -190,9 +187,9 @@ def bucket_meta_tiles(records: pl.DataFrame, z: int) -> pl.DataFrame:
         .select("id", "tx", "ty")
     )
 
-    rec = pl.struct(
-        "id", "t", "x", "y", "radius", "c", "out", "inn", "no", "ni"
-    ).alias("rec")
+    rec = pl.struct("id", "t", "x", "y", "radius", "c", "out", "inn", "no", "ni").alias(
+        "rec"
+    )
     return (
         tiles.join(visible.with_columns(rec).select("id", "rec"), on="id", how="inner")
         .group_by(["tx", "ty"], maintain_order=False)
@@ -204,7 +201,9 @@ def encode_tile(tx: int, ty: int, recs: list[dict]) -> tuple[int, int, bytes]:
     """Reshape a tile's node records into compact JSON and gzip them."""
     entries = []
     for rec in recs:
-        out = [[o["dx"], o["dy"], o["cr"], o["cg"], o["cb"]] for o in (rec["out"] or [])]
+        out = [
+            [o["dx"], o["dy"], o["cr"], o["cg"], o["cb"]] for o in (rec["out"] or [])
+        ]
         inn = [[i["sx"], i["sy"]] for i in (rec["inn"] or [])]
         entries.append(
             {
@@ -220,7 +219,9 @@ def encode_tile(tx: int, ty: int, recs: list[dict]) -> tuple[int, int, bytes]:
                 "ni": rec["ni"],
             }
         )
-    data = json.dumps(entries, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    data = json.dumps(entries, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
     return tx, ty, gzip.compress(data, compresslevel=6)
 
 
@@ -232,9 +233,13 @@ def build_layer(records: pl.DataFrame, z: int) -> dict[tuple[int, int], bytes]:
         logger.info(f"z={z}: no nodes above {NODE_META_MIN_PX}px, skipping")
         return {}
 
+    txs = bucketed["tx"].to_list()
+    tys = bucketed["ty"].to_list()
+    recs_col = bucketed["recs"].to_list()
+
     layer: dict[tuple[int, int], bytes] = {}
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(encode_tile)(tx, ty, recs) for tx, ty, recs in bucketed.iter_rows()
+        delayed(encode_tile)(tx, ty, recs) for tx, ty, recs in zip(txs, tys, recs_col)
     )
     for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
         results, total=n_tiles, desc=f"Encoding z={z}", unit=" tiles"
