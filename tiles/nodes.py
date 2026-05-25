@@ -28,7 +28,7 @@ NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
 # with α^γ before applying any further tone curve. γ=2.0 is a clean sqrt
 # (one GPU instruction to decode); γ=2.2 lifts the very dim end slightly
 # more. Identity at γ=1.0.
-ALPHA_GAMMA = 2.0
+ALPHA_GAMMA = 3.0
 
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
