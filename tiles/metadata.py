@@ -50,7 +50,7 @@ META_TILES_OUTPUT_PATH = Path("intermediates/node_meta.pmtiles")
 # A node gets metadata in a tile only once its radius reaches this many pixels
 # at that zoom — keeps tiles small and matches "interactive only when big
 # enough." radius_px = radius * TILE_SIZE * 2^z / WORLD_EXTENT.
-NODE_META_MIN_PX = 6.0
+NODE_META_MIN_PX = 5.0
 
 # Cap on in/out neighbors kept per node, ranked by the neighbor's pagerank.
 TOP_K = 100
