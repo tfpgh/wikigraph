@@ -7,7 +7,8 @@ Three artifacts land in output/:
    at that zoom *and whose center falls inside the tile*. Center-only placement
    means exactly one entry per node per zoom level (no replication across the
    tiles a big node spans). Each entry is self-contained — geometry, label,
-   cluster, pagerank rank, and the node's full in/out adjacency — so the
+   cluster, pagerank rank, and the node's in/out adjacency (capped to the top
+   NEIGHBOR_CAP neighbors by pagerank) — so the
    frontend never makes a per-node fetch on hover. Neighbor entries carry their
    own position, radius, and cluster id; the frontend resolves cluster id to a
    color via meta.json.
@@ -17,16 +18,16 @@ Three artifacts land in output/:
          "id": 12345, "t": "United States",
          "x": 32100.5, "y": 18000.2, "r": 40.0,
          "cl": 7, "pr": 1,
-         "out": [[x, y, r, cl], ...],   # every outlink, no cap
-         "in":  [[x, y, r, cl], ...]    # every inlink, no cap
+         "out": [[x, y, r, cl], ...],   # top NEIGHBOR_CAP outlinks by pagerank
+         "in":  [[x, y, r, cl], ...]    # top NEIGHBOR_CAP inlinks by pagerank
        }
 
 2. pages.pmtiles — one entry per page, addressed by mapping the dense page id
    into a (z, x, y) slot. There's no tile-pyramid meaning here: we pick the
    smallest zoom Z whose grid holds every page, then pack id -> tileid densely
    along the PMTiles Hilbert order (tileid = base(Z) + id). Each entry carries
-   the page plus its full adjacency, with neighbor id and title included so the
-   frontend can render a link panel without a tile lookup.
+   the page plus its adjacency (same top-NEIGHBOR_CAP cap), with neighbor id and
+   title included so the frontend can render a link panel without a tile lookup.
 
    Page entry shape:
        {
@@ -43,6 +44,7 @@ Three artifacts land in output/:
 import gzip
 import json
 import math
+import os
 from pathlib import Path
 
 import polars as pl
@@ -71,18 +73,28 @@ META_JSON_OUTPUT_PATH = Path("output/meta.json")
 # enough." radius_px = radius * TILE_SIZE * 2^z / WORLD_EXTENT.
 NODE_META_MIN_PX = 5.0
 
+# Cap on in/out neighbors kept per node, ranked by the neighbor's pagerank.
+# Bounds worst-case tile/page payloads — only a few thousand hub pages have
+# more than this many edges; the long tail keeps its full adjacency.
+NEIGHBOR_CAP = 5000
+
 # World-coordinate rounding in the JSON. 0.01 world units is well under a pixel
 # even at max zoom, and trims float repr bloat.
 COORD_DECIMALS = 2
+
+# Rows per parallel-encode task. Encoding is dispatched in chunks (not one task
+# per tile/page) so loky workers stay busy instead of starving on IPC overhead.
+ENCODE_CHUNK_ROWS = 10_000
 
 
 def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
     """Assemble one self-contained metadata record per node.
 
     Returns columns: id, t, x, y, radius, cl (cluster id), pr (pagerank rank,
-    1 = highest), out and inn (list[struct] of full neighbor adjacency). Each
-    neighbor struct holds nid, nt, nx, ny, nr, ncl — the same shape for both
-    directions so the two encoders can project whichever fields they need.
+    1 = highest), out and inn (list[struct] of neighbor adjacency, capped to the
+    top NEIGHBOR_CAP by the neighbor's pagerank). Each neighbor struct holds
+    nid, nt, nx, ny, nr, ncl — the same shape for both directions so the two
+    encoders can project whichever fields they need.
     """
     attrs = nodes.select(
         "id",
@@ -91,6 +103,7 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
         pl.col("y").round(COORD_DECIMALS),
         pl.col("radius").round(COORD_DECIMALS),
         pl.col("partition"),
+        pl.col("pagerank"),
         pl.col("pagerank")
         .rank(method="ordinal", descending=True)
         .cast(pl.Int64)
@@ -98,7 +111,9 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
     )
 
     # Neighbor attributes, keyed once per direction by the join column. id is
-    # aliased twice (join key + nid) so the struct keeps the neighbor's own id.
+    # aliased twice (join key + nid) so the struct keeps the neighbor's own id;
+    # npr is the neighbor's pagerank, used only to rank the top-K and dropped
+    # from the emitted struct.
     def neighbor(join_col: str) -> pl.DataFrame:
         return attrs.select(
             pl.col("id").alias(join_col),
@@ -108,23 +123,24 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
             pl.col("y").alias("ny"),
             pl.col("radius").alias("nr"),
             pl.col("partition").alias("ncl"),
+            pl.col("pagerank").alias("npr"),
         )
 
     nb_struct = pl.struct("nid", "nt", "nx", "ny", "nr", "ncl")
 
-    # Outgoing: for each src, all dst neighbors (full destination attributes).
+    # Outgoing: for each src, its top-K dst neighbors by pagerank.
     out_adj = (
         edges.join(neighbor("dst"), on="dst", how="inner")
         .group_by("src")
-        .agg(nb_struct.alias("out"))
+        .agg(nb_struct.top_k_by("npr", NEIGHBOR_CAP).alias("out"))
         .rename({"src": "id"})
     )
 
-    # Incoming: for each dst, all src neighbors (full source attributes).
+    # Incoming: for each dst, its top-K src neighbors by pagerank.
     in_adj = (
         edges.join(neighbor("src"), on="src", how="inner")
         .group_by("dst")
-        .agg(nb_struct.alias("inn"))
+        .agg(nb_struct.top_k_by("npr", NEIGHBOR_CAP).alias("inn"))
         .rename({"dst": "id"})
     )
 
@@ -211,22 +227,41 @@ def encode_tile(tx: int, ty: int, recs: list[dict]) -> tuple[int, int, bytes]:
     return tx, ty, gzip.compress(data, compresslevel=6)
 
 
+def encode_tile_chunk(chunk: pl.DataFrame) -> list[tuple[int, int, bytes]]:
+    """Encode a slice of tiles in one worker task (chunked to amortize IPC)."""
+    return [encode_tile(tx, ty, recs) for tx, ty, recs in chunk.iter_rows()]
+
+
+def slice_for_parallelism(df: pl.DataFrame) -> list[pl.DataFrame]:
+    """Split a frame into ~cores×4 chunks (capped at ENCODE_CHUNK_ROWS rows).
+
+    Targeting several chunks per core keeps all workers fed even on zoom levels
+    with few tiles, while the row cap bounds per-task memory on the big levels.
+    """
+    n = len(df)
+    target = max(1, (os.cpu_count() or 1) * 4)
+    size = max(1, min(ENCODE_CHUNK_ROWS, math.ceil(n / target)))
+    return list(df.iter_slices(size))
+
+
 def build_layer(records: pl.DataFrame, z: int) -> dict[tuple[int, int], bytes]:
-    """Bucket and encode every metadata tile at zoom z."""
+    """Bucket and encode every metadata tile at zoom z (chunked across cores)."""
     bucketed = bucket_meta_tiles(records, z)
     n_tiles = len(bucketed)
     if n_tiles == 0:
         logger.info(f"z={z}: no nodes above {NODE_META_MIN_PX}px, skipping")
         return {}
 
+    chunks = slice_for_parallelism(bucketed)
     layer: dict[tuple[int, int], bytes] = {}
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(encode_tile)(tx, ty, recs) for tx, ty, recs in bucketed.iter_rows()
+        delayed(encode_tile_chunk)(chunk) for chunk in chunks
     )
-    for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
-        results, total=n_tiles, desc=f"Encoding z={z}", unit=" tiles"
+    for batch in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
+        results, total=len(chunks), desc=f"Encoding z={z}", unit=" chunks"
     ):
-        layer[(tx, ty)] = data
+        for tx, ty, data in batch:
+            layer[(tx, ty)] = data
 
     total_bytes = sum(len(b) for b in layer.values())
     logger.info(
@@ -236,37 +271,34 @@ def build_layer(records: pl.DataFrame, z: int) -> dict[tuple[int, int], bytes]:
     return layer
 
 
-def encode_page(
-    rid: int,
-    t: str,
-    cl: int,
-    pr: int,
-    out: list[dict] | None,
-    inn: list[dict] | None,
-    base: int,
-) -> tuple[int, int, bytes]:
-    """Encode one page's full record to gzipped JSON, addressed by its id.
+def encode_page_chunk(chunk: pl.DataFrame, base: int) -> list[tuple[int, int, bytes]]:
+    """Encode a slice of pages in one worker task.
 
-    The page id is mapped to a (z, x, y) slot via the PMTiles Hilbert order:
+    Each page id is mapped to a (z, x, y) slot via the PMTiles Hilbert order:
     tileid = base + id, where base is the first tileid at the packing zoom.
     """
-    _, x, y = tileid_to_zxy(base + rid)
-    entry = {
-        "id": rid,
-        "t": t,
-        "cl": cl,
-        "pr": pr,
-        "out": [
-            [n["nid"], n["nt"], n["nx"], n["ny"], n["nr"], n["ncl"]]
-            for n in (out or [])
-        ],
-        "in": [
-            [n["nid"], n["nt"], n["nx"], n["ny"], n["nr"], n["ncl"]]
-            for n in (inn or [])
-        ],
-    }
-    data = json.dumps(entry, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return x, y, gzip.compress(data, compresslevel=6)
+    rows: list[tuple[int, int, bytes]] = []
+    for rid, t, cl, pr, out, inn in chunk.iter_rows():
+        _, x, y = tileid_to_zxy(base + rid)
+        entry = {
+            "id": rid,
+            "t": t,
+            "cl": cl,
+            "pr": pr,
+            "out": [
+                [n["nid"], n["nt"], n["nx"], n["ny"], n["nr"], n["ncl"]]
+                for n in (out or [])
+            ],
+            "in": [
+                [n["nid"], n["nt"], n["nx"], n["ny"], n["nr"], n["ncl"]]
+                for n in (inn or [])
+            ],
+        }
+        data = json.dumps(entry, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+        rows.append((x, y, gzip.compress(data, compresslevel=6)))
+    return rows
 
 
 def build_page_archive(
@@ -283,15 +315,16 @@ def build_page_archive(
     logger.info(f"Packing {n:,} pages at z={z} ({2**z:,} per side, base tileid {base:,})")
 
     sel = records.sort("id").select("id", "t", "cl", "pr", "out", "inn")
+    chunks = slice_for_parallelism(sel)
     layer: dict[tuple[int, int], bytes] = {}
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(encode_page)(rid, t, cl, pr, out, inn, base)
-        for rid, t, cl, pr, out, inn in sel.iter_rows()
+        delayed(encode_page_chunk)(chunk, base) for chunk in chunks
     )
-    for x, y, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
-        results, total=n, desc="Encoding pages", unit=" pages"
+    for batch in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
+        results, total=len(chunks), desc="Encoding pages", unit=" chunks"
     ):
-        layer[(x, y)] = data
+        for x, y, data in batch:
+            layer[(x, y)] = data
 
     total_bytes = sum(len(b) for b in layer.values())
     logger.info(f"Page archive: {n:,} pages, {total_bytes / 1e6:.1f} MB gzipped")
@@ -352,7 +385,7 @@ if __name__ == "__main__":
     max_z = compute_max_zoom(nodes["radius"])
 
     records = build_records(nodes, edges)
-    logger.success(f"Built {len(records):,} node records (full in/out adjacency)")
+    logger.success(f"Built {len(records):,} node records (top-{NEIGHBOR_CAP} in/out)")
 
     # 1. Tile pyramid.
     pyramid: dict[int, dict[tuple[int, int], bytes]] = {}
