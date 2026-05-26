@@ -32,6 +32,7 @@ SSAA = 4
 # stored = α^(1/γ). Lifts low-density regions into visible alpha. This is the
 # final stored alpha — there is NO frontend decode. γ=1.0 is identity.
 ALPHA_GAMMA = 1.0
+ALPHA_BETA = 0.2  # asinh softening length (active curve; smaller = more lift)
 
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
@@ -93,6 +94,7 @@ def render_node_tile(
     greens: list[int],
     blues: list[int],
     alpha_gamma: float = 1.0,
+    alpha_beta: float = 0.2,
     ssaa: int = 1,
 ) -> tuple[int, int, bytes]:
     """Render one tile of nodes at zoom z to lossless WebP bytes.
@@ -157,8 +159,11 @@ def render_node_tile(
 
     # Brightening curve, applied AFTER the downsample so it maps true coverage.
     a = np.clip(a, 0.0, 1.0)
-    if alpha_gamma != 1.0:
-        a = np.power(a, 1.0 / alpha_gamma)
+    # asinh stretch (active) — baked equivalent of the frontend shader curve
+    a = np.arcsinh(a / alpha_beta) / np.arcsinh(1.0 / alpha_beta)
+    # power/gamma — swap in by uncommenting, comment the asinh line above
+    # if alpha_gamma != 1.0:
+    #     a = np.power(a, 1.0 / alpha_gamma)
 
     out = np.empty((TILE_SIZE, TILE_SIZE, 4), dtype=np.float32)
     out[..., :3] = rgb
@@ -187,7 +192,7 @@ def render_layer(
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         delayed(render_node_tile)(
-            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, SSAA
+            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, ALPHA_BETA, SSAA
         )
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
