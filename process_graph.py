@@ -17,6 +17,8 @@ NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
+CLUSTERING_RESOLUTION = 1.0
+
 PAGERANK_RADIUS_EXPONENT = 0.5
 TARGET_NODE_FILL = 0.0005
 
@@ -79,7 +81,7 @@ def compute_clusters() -> None:
     G = cugraph.Graph(directed=False)
     G.from_cudf_edgelist(edges_df, source="src", destination="dst")
 
-    partitions, modularity = cugraph.leiden(G, resolution=0.45)
+    partitions, modularity = cugraph.leiden(G, resolution=CLUSTERING_RESOLUTION)
     partitions = partitions.rename(columns={"vertex": "id"})
 
     n_clusters = int(partitions["partition"].nunique())  # pyright: ignore[reportOptionalMemberAccess, reportArgumentType]

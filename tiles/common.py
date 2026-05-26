@@ -15,7 +15,7 @@ TILE_SIZE = 1024
 
 # Max zoom is picked so the small-radius percentile of nodes is at least
 # MIN_NODE_TARGET_PX pixels at that zoom.
-MIN_NODE_TARGET_PX = 10.0
+MIN_NODE_TARGET_PX = 1.0
 RADIUS_PERCENTILE_FOR_MAX_Z = 0.001
 
 
