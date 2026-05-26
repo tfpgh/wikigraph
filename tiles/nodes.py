@@ -20,7 +20,7 @@ from tiles.palette import compute_palette
 NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 
 PALETTE_OUTPUT_PATH = Path("intermediates/cluster_palette.parquet")
-NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
+NODE_TILES_OUTPUT_PATH = Path("output/node_tiles.pmtiles")
 
 SSAA = 4
 

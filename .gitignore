@@ -227,3 +227,6 @@ intermediates/*
 
 logs/*
 !logs/.gitkeep
+
+output/*
+!output/.gitkeep
