@@ -18,6 +18,7 @@ Three artifacts land in output/:
          "id": 12345, "t": "United States",
          "x": 32100.5, "y": 18000.2, "r": 40.0,
          "cl": 7, "pr": 1,
+         "no": 1503, "ni": 251032,      # true out/in degree (lists are capped)
          "out": [[x, y, r, cl], ...],   # top NEIGHBOR_CAP outlinks by pagerank
          "in":  [[x, y, r, cl], ...]    # top NEIGHBOR_CAP inlinks by pagerank
        }
@@ -32,6 +33,7 @@ Three artifacts land in output/:
    Page entry shape:
        {
          "id": 12345, "t": "United States", "cl": 7, "pr": 1,
+         "no": 1503, "ni": 251032,            # true out/in degree
          "out": [[id, t, x, y, r, cl], ...],
          "in":  [[id, t, x, y, r, cl], ...]
        }
@@ -128,19 +130,27 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
 
     nb_struct = pl.struct("nid", "nt", "nx", "ny", "nr", "ncl")
 
-    # Outgoing: for each src, its top-K dst neighbors by pagerank.
+    # Outgoing: for each src, its top-K dst neighbors by pagerank, plus the true
+    # out-degree (no) so the frontend can show "+N more" past the cap.
     out_adj = (
         edges.join(neighbor("dst"), on="dst", how="inner")
         .group_by("src")
-        .agg(nb_struct.top_k_by("npr", NEIGHBOR_CAP).alias("out"))
+        .agg(
+            pl.len().alias("no"),
+            nb_struct.top_k_by("npr", NEIGHBOR_CAP).alias("out"),
+        )
         .rename({"src": "id"})
     )
 
-    # Incoming: for each dst, its top-K src neighbors by pagerank.
+    # Incoming: for each dst, its top-K src neighbors by pagerank, plus the true
+    # in-degree (ni).
     in_adj = (
         edges.join(neighbor("src"), on="src", how="inner")
         .group_by("dst")
-        .agg(nb_struct.top_k_by("npr", NEIGHBOR_CAP).alias("inn"))
+        .agg(
+            pl.len().alias("ni"),
+            nb_struct.top_k_by("npr", NEIGHBOR_CAP).alias("inn"),
+        )
         .rename({"dst": "id"})
     )
 
@@ -156,6 +166,10 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
         )
         .join(out_adj, on="id", how="left")
         .join(in_adj, on="id", how="left")
+        .with_columns(
+            pl.col("no").fill_null(0),
+            pl.col("ni").fill_null(0),
+        )
     )
 
 
@@ -178,7 +192,9 @@ def bucket_meta_tiles(records: pl.DataFrame, z: int) -> pl.DataFrame:
     tile_w = WORLD_EXTENT / (2**z)
     n_axis = 2**z
 
-    rec = pl.struct("id", "t", "x", "y", "radius", "cl", "pr", "out", "inn").alias("rec")
+    rec = pl.struct(
+        "id", "t", "x", "y", "radius", "cl", "pr", "no", "ni", "out", "inn"
+    ).alias("rec")
     return (
         visible.with_columns(
             ((pl.col("x") + WORLD_EXTENT / 2) / tile_w)
@@ -217,6 +233,8 @@ def encode_tile(tx: int, ty: int, recs: list[dict]) -> tuple[int, int, bytes]:
                 "r": rec["radius"],
                 "cl": rec["cl"],
                 "pr": rec["pr"],
+                "no": rec["no"],
+                "ni": rec["ni"],
                 "out": out,
                 "in": inn,
             }
@@ -278,13 +296,15 @@ def encode_page_chunk(chunk: pl.DataFrame, base: int) -> list[tuple[int, int, by
     tileid = base + id, where base is the first tileid at the packing zoom.
     """
     rows: list[tuple[int, int, bytes]] = []
-    for rid, t, cl, pr, out, inn in chunk.iter_rows():
+    for rid, t, cl, pr, no, ni, out, inn in chunk.iter_rows():
         _, x, y = tileid_to_zxy(base + rid)
         entry = {
             "id": rid,
             "t": t,
             "cl": cl,
             "pr": pr,
+            "no": no,
+            "ni": ni,
             "out": [
                 [n["nid"], n["nt"], n["nx"], n["ny"], n["nr"], n["ncl"]]
                 for n in (out or [])
@@ -314,7 +334,7 @@ def build_page_archive(
     base = (4**z - 1) // 3  # first tileid at zoom z
     logger.info(f"Packing {n:,} pages at z={z} ({2**z:,} per side, base tileid {base:,})")
 
-    sel = records.sort("id").select("id", "t", "cl", "pr", "out", "inn")
+    sel = records.sort("id").select("id", "t", "cl", "pr", "no", "ni", "out", "inn")
     chunks = slice_for_parallelism(sel)
     layer: dict[tuple[int, int], bytes] = {}
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
