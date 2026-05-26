@@ -22,13 +22,20 @@ NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 PALETTE_OUTPUT_PATH = Path("intermediates/cluster_palette.parquet")
 NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
 
-# sRGB-style gamma encoding on the alpha channel before WebP encoding:
-# stored = α^(1/γ). Concentrates 8-bit precision at the dim end of the range
-# instead of letting low-alpha pixels quantize to zero. Frontend must decode
-# with α^γ before applying any further tone curve. γ=2.0 is a clean sqrt
-# (one GPU instruction to decode); γ=2.2 lifts the very dim end slightly
-# more. Identity at γ=1.0.
-ALPHA_GAMMA = 3.0
+# Brightening tone curve baked onto the alpha (straight coverage) channel
+# before WebP encoding, to lift low-density "galaxy" regions into meaningful
+# alpha. This is the final stored alpha — there is NO frontend decode.
+#
+# Two curves live in render_node_tile; swap by (un)commenting one block:
+#   - asinh stretch (active): astronomy-style. Linear toe (doesn't over-lift
+#     the empty floor into haze) + log shoulder (cores compress, don't clip).
+#     ALPHA_BETA is the softening length — smaller = more faint lift.
+#   - power/gamma: stored = α^(1/γ). Single knob; uniquely compresses the
+#     per-level transition step by a constant 4^(1/γ) (scale-invariant), so
+#     it doubles as a smoothness fix. asinh is linear at the faint end and
+#     does not, so transitions may need the per-level gain to stay smooth.
+ALPHA_GAMMA = 3.0  # power curve exponent
+ALPHA_BETA = 0.05  # asinh softening length
 
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
@@ -90,6 +97,7 @@ def render_node_tile(
     greens: list[int],
     blues: list[int],
     alpha_gamma: float = 1.0,
+    alpha_beta: float = 0.05,
 ) -> tuple[int, int, bytes]:
     """Render one tile of nodes at zoom z to lossless WebP bytes.
 
@@ -98,10 +106,10 @@ def render_node_tile(
     Background is transparent; the frontend composites it onto whatever
     background it wants.
 
-    When alpha_gamma > 1, alpha is sRGB-style encoded (stored = α^(1/γ)) before
-    WebP encoding to give 8-bit precision to the dim end of the range instead
-    of quantizing it to zero; the frontend must decode with α^γ before applying
-    any further curve.
+    A brightening tone curve is baked onto the alpha channel before encoding
+    (asinh stretch by default; power/gamma available by swapping the commented
+    block) to lift low-density regions into visible alpha. This is the final
+    stored alpha — the frontend does not decode it.
     """
     info = skia.ImageInfo.Make(
         TILE_SIZE,
@@ -139,8 +147,14 @@ def render_node_tile(
         alphaType=skia.AlphaType.kUnpremul_AlphaType,
     ).copy()
 
-    if alpha_gamma != 1.0:
-        arr[..., 3] = np.power(np.clip(arr[..., 3], 0.0, 1.0), 1.0 / alpha_gamma)
+    a = np.clip(arr[..., 3], 0.0, 1.0)
+
+    # asinh stretch (active) — galaxy curve; alpha_beta = softening length
+    arr[..., 3] = np.arcsinh(a / alpha_beta) / np.arcsinh(1.0 / alpha_beta)
+
+    # power/gamma curve — swap in by uncommenting, comment the asinh line above
+    # if alpha_gamma != 1.0:
+    #     arr[..., 3] = np.power(a, 1.0 / alpha_gamma)
 
     arr = np.rint(np.clip(arr * 255.0, 0, 255)).astype(np.uint8)
 
@@ -166,7 +180,7 @@ def render_layer(
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         delayed(render_node_tile)(
-            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA
+            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, ALPHA_BETA
         )
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
