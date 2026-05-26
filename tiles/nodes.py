@@ -37,6 +37,12 @@ NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
 ALPHA_GAMMA = 3.0  # power curve exponent
 ALPHA_BETA = 0.05  # asinh softening length
 
+# After the curve, affine-rescale nonzero alpha from (0,1] up into [ALPHA_FLOOR,1]
+# so faint specks read as glow instead of near-invisible noise. This is a
+# resize, not a clamp — relative ordering is preserved. True-empty pixels
+# (alpha == 0) stay 0 so the transparent background isn't lifted. 0.0 = off.
+ALPHA_FLOOR = 0.1
+
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
     """Group nodes by their z=MAX tile.
@@ -98,6 +104,7 @@ def render_node_tile(
     blues: list[int],
     alpha_gamma: float = 1.0,
     alpha_beta: float = 0.05,
+    alpha_floor: float = 0.0,
 ) -> tuple[int, int, bytes]:
     """Render one tile of nodes at zoom z to lossless WebP bytes.
 
@@ -156,6 +163,13 @@ def render_node_tile(
     # if alpha_gamma != 1.0:
     #     arr[..., 3] = np.power(a, 1.0 / alpha_gamma)
 
+    # lift the floor of nonzero alpha (resize, not clamp); empty stays empty
+    if alpha_floor > 0.0:
+        alpha = arr[..., 3]
+        arr[..., 3] = np.where(
+            alpha > 0.0, alpha_floor + (1.0 - alpha_floor) * alpha, 0.0
+        )
+
     arr = np.rint(np.clip(arr * 255.0, 0, 255)).astype(np.uint8)
 
     return tx, ty, encode_webp_lossless(arr)
@@ -180,7 +194,7 @@ def render_layer(
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         delayed(render_node_tile)(
-            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, ALPHA_BETA
+            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, ALPHA_BETA, ALPHA_FLOOR
         )
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
