@@ -22,17 +22,7 @@ NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 PALETTE_OUTPUT_PATH = Path("intermediates/cluster_palette.parquet")
 NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
 
-# Tiles are rasterized at SSAA × TILE_SIZE and box-averaged down to TILE_SIZE
-# for anti-aliasing. Everything stays F32 through the downsample and the tone
-# curve; the only quantization is the final collapse to 8-bit WebP.
 SSAA = 4
-
-# Brightening tone curve baked onto the alpha (straight coverage) channel,
-# applied AFTER the downsample so it maps true per-pixel coverage:
-# stored = α^(1/γ). Lifts low-density regions into visible alpha. This is the
-# final stored alpha — there is NO frontend decode. γ=1.0 is identity.
-ALPHA_GAMMA = 1.0
-ALPHA_BETA = 0.2  # asinh softening length (active curve; smaller = more lift)
 
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
@@ -93,9 +83,6 @@ def render_node_tile(
     reds: list[int],
     greens: list[int],
     blues: list[int],
-    alpha_gamma: float = 1.0,
-    alpha_beta: float = 0.2,
-    ssaa: int = 1,
 ) -> tuple[int, int, bytes]:
     """Render one tile of nodes at zoom z to lossless WebP bytes.
 
@@ -104,13 +91,12 @@ def render_node_tile(
     Background is transparent; the frontend composites it onto whatever
     background it wants.
 
-    The tile is rasterized at ssaa × TILE_SIZE and box-averaged down to
-    TILE_SIZE (premultiplied F32, so edges don't bleed). The α^(1/γ)
-    brightening curve is applied AFTER the downsample, so it maps the true
-    per-pixel coverage. Everything stays F32 until the final 8-bit collapse for
-    WebP; the frontend does not decode the alpha.
+    The tile is rasterized at SSAA × TILE_SIZE and box-averaged down to
+    TILE_SIZE (premultiplied F32, so edges don't bleed). The alpha channel
+    stores linear coverage; the brightening curve is a frontend shader, not
+    baked here. Everything stays F32 until the final 8-bit collapse for WebP.
     """
-    hi = TILE_SIZE * ssaa
+    hi = TILE_SIZE * SSAA
     info = skia.ImageInfo.Make(
         hi,
         hi,
@@ -149,25 +135,17 @@ def render_node_tile(
         alphaType=skia.AlphaType.kPremul_AlphaType,
     )
 
-    # Box-average ssaa×ssaa blocks down to TILE_SIZE, in F32 premultiplied space.
-    down = premul.reshape(TILE_SIZE, ssaa, TILE_SIZE, ssaa, 4).mean(axis=(1, 3))
+    # Box-average SSAA×SSAA blocks down to TILE_SIZE, in F32 premultiplied space.
+    down = premul.reshape(TILE_SIZE, SSAA, TILE_SIZE, SSAA, 4).mean(axis=(1, 3))
 
-    # Un-premultiply back to straight color; alpha is now the true coverage.
+    # Un-premultiply back to straight color; alpha is the true linear coverage.
     a = down[..., 3]
     with np.errstate(divide="ignore", invalid="ignore"):
         rgb = np.where(a[..., None] > 0.0, down[..., :3] / a[..., None], 0.0)
 
-    # Brightening curve, applied AFTER the downsample so it maps true coverage.
-    a = np.clip(a, 0.0, 1.0)
-    # asinh stretch (active) — baked equivalent of the frontend shader curve
-    a = np.arcsinh(a / alpha_beta) / np.arcsinh(1.0 / alpha_beta)
-    # power/gamma — swap in by uncommenting, comment the asinh line above
-    # if alpha_gamma != 1.0:
-    #     a = np.power(a, 1.0 / alpha_gamma)
-
     out = np.empty((TILE_SIZE, TILE_SIZE, 4), dtype=np.float32)
     out[..., :3] = rgb
-    out[..., 3] = a
+    out[..., 3] = np.clip(a, 0.0, 1.0)
     out = np.rint(np.clip(out * 255.0, 0, 255)).astype(np.uint8)
 
     return tx, ty, encode_webp_lossless(out)
@@ -191,9 +169,7 @@ def render_layer(
     layer: dict[tuple[int, int], bytes] = {}
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
-        delayed(render_node_tile)(
-            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, ALPHA_BETA, SSAA
-        )
+        delayed(render_node_tile)(tx, ty, z, xs, ys, rs, reds, greens, blues)
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
     for tx, ty, data in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
