@@ -22,26 +22,16 @@ NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 PALETTE_OUTPUT_PATH = Path("intermediates/cluster_palette.parquet")
 NODE_TILES_OUTPUT_PATH = Path("intermediates/node_tiles.pmtiles")
 
-# Brightening tone curve baked onto the alpha (straight coverage) channel
-# before WebP encoding, to lift low-density "galaxy" regions into meaningful
-# alpha. This is the final stored alpha — there is NO frontend decode.
-#
-# Two curves live in render_node_tile; swap by (un)commenting one block:
-#   - asinh stretch (active): astronomy-style. Linear toe (doesn't over-lift
-#     the empty floor into haze) + log shoulder (cores compress, don't clip).
-#     ALPHA_BETA is the softening length — smaller = more faint lift.
-#   - power/gamma: stored = α^(1/γ). Single knob; uniquely compresses the
-#     per-level transition step by a constant 4^(1/γ) (scale-invariant), so
-#     it doubles as a smoothness fix. asinh is linear at the faint end and
-#     does not, so transitions may need the per-level gain to stay smooth.
-ALPHA_GAMMA = 3.0  # power curve exponent
-ALPHA_BETA = 0.05  # asinh softening length
+# Tiles are rasterized at SSAA × TILE_SIZE and box-averaged down to TILE_SIZE
+# for anti-aliasing. Everything stays F32 through the downsample and the tone
+# curve; the only quantization is the final collapse to 8-bit WebP.
+SSAA = 4
 
-# After the curve, affine-rescale nonzero alpha from (0,1] up into [ALPHA_FLOOR,1]
-# so faint specks read as glow instead of near-invisible noise. This is a
-# resize, not a clamp — relative ordering is preserved. True-empty pixels
-# (alpha == 0) stay 0 so the transparent background isn't lifted. 0.0 = off.
-ALPHA_FLOOR = 0.1
+# Brightening tone curve baked onto the alpha (straight coverage) channel,
+# applied AFTER the downsample so it maps true per-pixel coverage:
+# stored = α^(1/γ). Lifts low-density regions into visible alpha. This is the
+# final stored alpha — there is NO frontend decode. γ=1.0 is identity.
+ALPHA_GAMMA = 1.0
 
 
 def bucket_nodes_by_tile(nodes: pl.DataFrame, max_z: int) -> pl.DataFrame:
@@ -103,8 +93,7 @@ def render_node_tile(
     greens: list[int],
     blues: list[int],
     alpha_gamma: float = 1.0,
-    alpha_beta: float = 0.05,
-    alpha_floor: float = 0.0,
+    ssaa: int = 1,
 ) -> tuple[int, int, bytes]:
     """Render one tile of nodes at zoom z to lossless WebP bytes.
 
@@ -113,14 +102,16 @@ def render_node_tile(
     Background is transparent; the frontend composites it onto whatever
     background it wants.
 
-    A brightening tone curve is baked onto the alpha channel before encoding
-    (asinh stretch by default; power/gamma available by swapping the commented
-    block) to lift low-density regions into visible alpha. This is the final
-    stored alpha — the frontend does not decode it.
+    The tile is rasterized at ssaa × TILE_SIZE and box-averaged down to
+    TILE_SIZE (premultiplied F32, so edges don't bleed). The α^(1/γ)
+    brightening curve is applied AFTER the downsample, so it maps the true
+    per-pixel coverage. Everything stays F32 until the final 8-bit collapse for
+    WebP; the frontend does not decode the alpha.
     """
+    hi = TILE_SIZE * ssaa
     info = skia.ImageInfo.Make(
-        TILE_SIZE,
-        TILE_SIZE,
+        hi,
+        hi,
         skia.ColorType.kRGBA_F32_ColorType,
         skia.AlphaType.kPremul_AlphaType,
         skia.ColorSpace.MakeSRGB(),
@@ -129,7 +120,7 @@ def render_node_tile(
     canvas = surface.getCanvas()
     canvas.clear(skia.Color4f(0, 0, 0, 0))
 
-    ppwu = TILE_SIZE * (2**z) / WORLD_EXTENT
+    ppwu = hi * (2**z) / WORLD_EXTENT
     origin_x = tx * WORLD_EXTENT / (2**z) - WORLD_EXTENT / 2
     origin_y = ty * WORLD_EXTENT / (2**z) - WORLD_EXTENT / 2
 
@@ -148,31 +139,33 @@ def render_node_tile(
             skia.Paint(AntiAlias=True, Color=skia.Color(red, green, blue)),
         )
 
+    # Read premultiplied so the box-average filters correctly — averaging
+    # straight alpha would bleed the transparent texels' black into the edges.
     image = surface.makeImageSnapshot()
-    arr = image.toarray(
+    premul = image.toarray(
         colorType=skia.ColorType.kRGBA_F32_ColorType,
-        alphaType=skia.AlphaType.kUnpremul_AlphaType,
-    ).copy()
+        alphaType=skia.AlphaType.kPremul_AlphaType,
+    )
 
-    a = np.clip(arr[..., 3], 0.0, 1.0)
+    # Box-average ssaa×ssaa blocks down to TILE_SIZE, in F32 premultiplied space.
+    down = premul.reshape(TILE_SIZE, ssaa, TILE_SIZE, ssaa, 4).mean(axis=(1, 3))
 
-    # asinh stretch (active) — galaxy curve; alpha_beta = softening length
-    arr[..., 3] = np.arcsinh(a / alpha_beta) / np.arcsinh(1.0 / alpha_beta)
+    # Un-premultiply back to straight color; alpha is now the true coverage.
+    a = down[..., 3]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rgb = np.where(a[..., None] > 0.0, down[..., :3] / a[..., None], 0.0)
 
-    # power/gamma curve — swap in by uncommenting, comment the asinh line above
-    # if alpha_gamma != 1.0:
-    #     arr[..., 3] = np.power(a, 1.0 / alpha_gamma)
+    # Brightening curve, applied AFTER the downsample so it maps true coverage.
+    a = np.clip(a, 0.0, 1.0)
+    if alpha_gamma != 1.0:
+        a = np.power(a, 1.0 / alpha_gamma)
 
-    # lift the floor of nonzero alpha (resize, not clamp); empty stays empty
-    if alpha_floor > 0.0:
-        alpha = arr[..., 3]
-        arr[..., 3] = np.where(
-            alpha > 0.0, alpha_floor + (1.0 - alpha_floor) * alpha, 0.0
-        )
+    out = np.empty((TILE_SIZE, TILE_SIZE, 4), dtype=np.float32)
+    out[..., :3] = rgb
+    out[..., 3] = a
+    out = np.rint(np.clip(out * 255.0, 0, 255)).astype(np.uint8)
 
-    arr = np.rint(np.clip(arr * 255.0, 0, 255)).astype(np.uint8)
-
-    return tx, ty, encode_webp_lossless(arr)
+    return tx, ty, encode_webp_lossless(out)
 
 
 def render_layer(
@@ -194,7 +187,7 @@ def render_layer(
     t_render = time.perf_counter()
     results = Parallel(n_jobs=-1, return_as="generator", backend="loky")(
         delayed(render_node_tile)(
-            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, ALPHA_BETA, ALPHA_FLOOR
+            tx, ty, z, xs, ys, rs, reds, greens, blues, ALPHA_GAMMA, SSAA
         )
         for tx, ty, xs, ys, rs, reds, greens, blues in bucketed.iter_rows()
     )
