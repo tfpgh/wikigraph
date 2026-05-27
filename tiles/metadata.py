@@ -106,9 +106,9 @@ def build_records(nodes: pl.DataFrame, edges: pl.DataFrame) -> pl.DataFrame:
     attrs = nodes.select(
         "id",
         "title",
-        pl.col("x").round(COORD_DECIMALS),
-        pl.col("y").round(COORD_DECIMALS),
-        pl.col("radius").round(COORD_DECIMALS),
+        pl.col("x").cast(pl.Float64).round(COORD_DECIMALS),
+        pl.col("y").cast(pl.Float64).round(COORD_DECIMALS),
+        pl.col("radius").cast(pl.Float64).round(COORD_DECIMALS),
         pl.col("partition"),
         pl.col("pagerank"),
         pl.col("pagerank")
@@ -347,7 +347,9 @@ def build_page_archive(
     n = len(records)
     z = max(1, math.ceil(math.log2(n) / 2))  # 4^z >= n
     base = (4**z - 1) // 3  # first tileid at zoom z
-    logger.info(f"Packing {n:,} pages at z={z} ({2**z:,} per side, base tileid {base:,})")
+    logger.info(
+        f"Packing {n:,} pages at z={z} ({2**z:,} per side, base tileid {base:,})"
+    )
 
     sel = records.sort("id").select(
         "id", "t", "cl", "pr", "no", "ni", "ob", "ib", "out", "inn"
