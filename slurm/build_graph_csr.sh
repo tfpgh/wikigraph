@@ -9,4 +9,10 @@
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512gb
 
+set -e
+
 uv run offline/build_graph_csr.py
+
+# Stage the artifact for the backend container image build.
+mkdir -p backend/build_data
+cp output/graph.csr backend/build_data/graph.csr
