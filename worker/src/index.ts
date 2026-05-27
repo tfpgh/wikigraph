@@ -19,7 +19,7 @@ import { Container, getContainer } from "@cloudflare/containers";
 
 interface Env {
   BUCKET: R2Bucket;
-  GRAPH_BACKEND: DurableObjectNamespace<GraphBackend>;
+  GRAPH_BACKEND: DurableObjectNamespace<Backend>;
   ALLOWED_ORIGINS?: string;
   CACHE_CONTROL?: string;
   PUBLIC_HOSTNAME?: string;
@@ -27,7 +27,7 @@ interface Env {
 }
 
 /** The container instance holding the graph + search index. */
-export class GraphBackend extends Container {
+export class Backend extends Container {
   defaultPort = 8080;
   sleepAfter = "20m"; // keep warm so the CSR isn't reloaded mid-spike
 }
@@ -38,7 +38,11 @@ const TILE =
   /^\/(?<NAME>[0-9a-zA-Z\/!\-_\.\*\'\(\)]+)\/(?<Z>\d+)\/(?<X>\d+)\/(?<Y>\d+)\.(?<EXT>[a-z]+)$/;
 const TILESET = /^\/(?<NAME>[0-9a-zA-Z\/!\-_\.\*\'\(\)]+)\.json$/;
 
-type ParsedPath = { name: string; tile?: [number, number, number]; ext: string };
+type ParsedPath = {
+  name: string;
+  tile?: [number, number, number];
+  ext: string;
+};
 
 function parsePath(pathname: string): ParsedPath | null {
   const tileMatch = pathname.match(TILE);
