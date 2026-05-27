@@ -5,7 +5,7 @@
 #   - build_data/search_docs.jsonl (built by offline/build_search_docs.py)
 # Copy those two files into backend/build_data/ before `wrangler deploy`.
 
-FROM rust:1-bookworm AS build
+FROM rust:1-trixie AS build
 WORKDIR /app
 
 # Compile both binaries. (Cargo.lock is generated on first build if absent.)
@@ -18,7 +18,7 @@ COPY build_data/search_docs.jsonl /tmp/search_docs.jsonl
 RUN /app/target/release/build_index /tmp/search_docs.jsonl /opt/data/index \
     && rm /tmp/search_docs.jsonl
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 WORKDIR /app
 COPY --from=build /app/target/release/server /usr/local/bin/server
 COPY --from=build /opt/data/index /opt/data/index
