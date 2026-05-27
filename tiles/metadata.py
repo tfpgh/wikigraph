@@ -77,7 +77,7 @@ META_JSON_OUTPUT_PATH = Path("output/meta.json")
 # A node gets metadata in a tile only once its radius reaches this many pixels
 # at that zoom — keeps tiles small and matches "interactive only when big
 # enough." radius_px = radius * TILE_SIZE * 2^z / WORLD_EXTENT.
-NODE_META_MIN_PX = 5.0
+NODE_META_MIN_PX = 2.0
 
 # Cap on in/out neighbors kept per node, ranked by the neighbor's pagerank.
 # Bounds payloads to the most important neighbors; the true totals are kept in
