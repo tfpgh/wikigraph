@@ -19,7 +19,7 @@ import { Container, getContainer } from "@cloudflare/containers";
 
 interface Env {
   BUCKET: R2Bucket;
-  GRAPH_BACKEND: DurableObjectNamespace<Backend>;
+  BACKEND: DurableObjectNamespace<Backend>;
   ALLOWED_ORIGINS?: string;
   CACHE_CONTROL?: string;
   PUBLIC_HOSTNAME?: string;
@@ -151,7 +151,7 @@ async function handleApi(
 
   // Directed /path queries are spiky + repetitive when shared — the cache
   // shields the container almost entirely under viral load.
-  const upstream = await getContainer(env.GRAPH_BACKEND).fetch(request);
+  const upstream = await getContainer(env.BACKEND).fetch(request);
   const headers = new Headers(upstream.headers);
   headers.set("Cache-Control", env.CACHE_CONTROL ?? "public, max-age=86400");
   const body = await upstream.arrayBuffer();
