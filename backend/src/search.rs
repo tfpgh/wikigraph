@@ -1,15 +1,21 @@
 //! Tantivy title index: build (offline, at image-build time) and query (server).
 //!
-//! Matching strategy for "find a node" autocomplete:
-//!   - the title field is tokenized (whitespace split + lowercase);
-//!   - every complete word in the query must match (exact, OR edit-distance-1
-//!     fuzzy for words >= 4 chars to tolerate typos);
-//!   - the final word is treated as a prefix (the word being typed);
-//!   - matches are ordered by `imp` (raw PageRank) descending, so the most
-//!     important matching article surfaces first.
+//! Matching ("find a node" autocomplete):
+//!   - tokens are whitespace-split, lowercased, and ASCII-folded (so `beyonce`
+//!     finds *Beyoncé*); the query is run through the same analyzers so the
+//!     index and query normalize identically;
+//!   - every complete word must match (exact, OR edit-distance-1 fuzzy for
+//!     words >= 4 chars to tolerate typos);
+//!   - the final word — the one being typed — matches as a prefix OR fuzzy.
 //!
-//! Ranking is deliberately importance-first rather than BM25 — for a graph
-//! navigator "apple" should land on Apple Inc., not an obscure exact match.
+//! Ranking is tiered so an exact title always wins, regardless of PageRank
+//! (typing "SoFi" must return *SoFi* even though it's a low-PageRank page):
+//!   - the token match above is the recall filter (MUST);
+//!   - boosted SHOULD clauses on the normalized whole title reward an exact
+//!     title (x1000) and a title that starts with the query (x100);
+//!   - `tweak_score` then multiplies the base score by `1 + imp`, where `imp`
+//!     is importance (PageRank) normalized to [0, 1]. Importance only orders
+//!     results *within* a tier; the 1000x exact boost can't be overtaken by it.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -18,15 +24,26 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, RegexQuery, TermQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, RegexQuery, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED,
 };
-use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer};
-use tantivy::{doc, Index, IndexReader, Order, TantivyDocument, Term};
+use tantivy::tokenizer::{
+    AsciiFoldingFilter, LowerCaser, RawTokenizer, SimpleTokenizer, TextAnalyzer,
+};
+use tantivy::{doc, DocId, Index, IndexReader, Score, SegmentReader, TantivyDocument, Term};
 
-const TOKENIZER: &str = "title";
+const TOKENIZER: &str = "title"; // word-split + lowercase + ascii-fold
+const RAW_TOKENIZER: &str = "title_raw"; // whole title as one token, normalized
 const FUZZY_MIN_LEN: usize = 4;
+
+// Tier boosts. Exact title dominates starts-with, which dominates a plain token
+// match. The gaps are wide enough that the <=2x importance multiplier can't
+// reorder across tiers.
+const EXACT_BOOST: Score = 1000.0;
+const PREFIX_BOOST: Score = 100.0;
+// imp is normalized to [0, 1]; weight 1.0 => multiplier in [1, 2].
+const IMPORTANCE_WEIGHT: f64 = 1.0;
 
 #[derive(Deserialize)]
 struct InputDoc {
@@ -47,17 +64,27 @@ pub struct Hit {
     pub r: f64,
 }
 
-fn register_tokenizer(index: &Index) {
-    // Whitespace tokenizer + lowercase, used both at index and query time so
-    // the terms line up.
-    let analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
+fn register_tokenizers(index: &Index) {
+    // Word-level tokenizer for token/fuzzy/prefix matching.
+    let words = TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
+        .filter(AsciiFoldingFilter)
         .build();
-    index.tokenizers().register(TOKENIZER, analyzer);
+    index.tokenizers().register(TOKENIZER, words);
+
+    // Whole-title-as-one-term tokenizer, same normalization, for exact and
+    // starts-with matching on the full title.
+    let raw = TextAnalyzer::builder(RawTokenizer::default())
+        .filter(LowerCaser)
+        .filter(AsciiFoldingFilter)
+        .build();
+    index.tokenizers().register(RAW_TOKENIZER, raw);
 }
 
 /// Build the index from the JSONL exported by `offline/build_search_docs.py`.
-/// Called by the `build_index` binary during `docker build`.
+/// Called by the `build_index` binary during `docker build`. `imp` in the JSONL
+/// is raw PageRank; it's log-min-max normalized to [0, 1] here so the JSONL
+/// format (and the cluster pipeline) stays unchanged when ranking is tuned.
 pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     std::fs::create_dir_all(index_dir)?;
 
@@ -69,6 +96,13 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
         .set_indexing_options(title_indexing)
         .set_stored();
     let title = sb.add_text_field("title", title_opts);
+
+    let raw_indexing = TextFieldIndexing::default()
+        .set_tokenizer(RAW_TOKENIZER)
+        .set_index_option(IndexRecordOption::Basic);
+    let title_raw =
+        sb.add_text_field("title_raw", TextOptions::default().set_indexing_options(raw_indexing));
+
     let id = sb.add_u64_field("id", STORED | FAST);
     let x = sb.add_f64_field("x", STORED);
     let y = sb.add_f64_field("y", STORED);
@@ -77,55 +111,86 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     let schema = sb.build();
 
     let index = Index::create_in_dir(index_dir, schema)?;
-    register_tokenizer(&index);
-
+    register_tokenizers(&index);
     let mut writer = index.writer(512_000_000)?; // 512 MB indexing heap
 
-    let file = File::open(docs_path).with_context(|| format!("open {}", docs_path.display()))?;
+    // Pass 1: importance range on a log scale (PageRank is heavy-tailed).
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for_each_doc(docs_path, |d| {
+        let l = d.imp.max(1e-12).ln();
+        lo = lo.min(l);
+        hi = hi.max(l);
+    })?;
+    let span = (hi - lo).max(1e-9);
+
+    // Pass 2: index with normalized importance.
     let mut count = 0u64;
+    for_each_doc(docs_path, |d| {
+        let imp_norm = (((d.imp.max(1e-12).ln()) - lo) / span).clamp(0.0, 1.0);
+        let _ = writer.add_document(doc!(
+            title => d.t.clone(),
+            title_raw => d.t,
+            id => d.id as u64,
+            x => d.x,
+            y => d.y,
+            r => d.r,
+            imp => imp_norm,
+        ));
+        count += 1;
+    })?;
+    writer.commit()?;
+    tracing::info!(docs = count, "search index built");
+    Ok(())
+}
+
+fn for_each_doc(path: &Path, mut f: impl FnMut(InputDoc)) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     for line in BufReader::new(file).lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let d: InputDoc = serde_json::from_str(&line)?;
-        writer.add_document(doc!(
-            title => d.t,
-            id => d.id as u64,
-            x => d.x,
-            y => d.y,
-            r => d.r,
-            imp => d.imp,
-        ))?;
-        count += 1;
+        f(serde_json::from_str(&line)?);
     }
-    writer.commit()?;
-    tracing::info!(docs = count, "search index built");
     Ok(())
 }
 
 pub struct Search {
     reader: IndexReader,
     title: Field,
+    title_raw: Field,
     id: Field,
     x: Field,
     y: Field,
     r: Field,
+    word_analyzer: TextAnalyzer,
+    raw_analyzer: TextAnalyzer,
 }
 
 impl Search {
     pub fn open(index_dir: &Path) -> Result<Search> {
         let index = Index::open_in_dir(index_dir)
             .with_context(|| format!("open index {}", index_dir.display()))?;
-        register_tokenizer(&index);
+        register_tokenizers(&index);
         let schema = index.schema();
+        let word_analyzer = index
+            .tokenizers()
+            .get(TOKENIZER)
+            .expect("title tokenizer registered");
+        let raw_analyzer = index
+            .tokenizers()
+            .get(RAW_TOKENIZER)
+            .expect("raw tokenizer registered");
         Ok(Search {
             reader: index.reader()?,
             title: schema.get_field("title")?,
+            title_raw: schema.get_field("title_raw")?,
             id: schema.get_field("id")?,
             x: schema.get_field("x")?,
             y: schema.get_field("y")?,
             r: schema.get_field("r")?,
+            word_analyzer,
+            raw_analyzer,
         })
     }
 
@@ -134,12 +199,19 @@ impl Search {
             return Ok(Vec::new());
         };
         let searcher = self.reader.searcher();
-        // Order matches by importance (PageRank) rather than text score.
-        let collector = TopDocs::with_limit(limit).order_by_fast_field::<f64>("imp", Order::Desc);
+
+        // base relevance (tier boosts) x (1 + weight * normalized importance)
+        let collector = TopDocs::with_limit(limit).tweak_score(move |seg: &SegmentReader| {
+            let imp = seg.fast_fields().f64("imp").ok();
+            move |doc: DocId, score: Score| -> f64 {
+                let i = imp.as_ref().and_then(|c| c.first(doc)).unwrap_or(0.0);
+                (score as f64) * (1.0 + IMPORTANCE_WEIGHT * i)
+            }
+        });
         let top = searcher.search(&*query, &collector)?;
 
         let mut hits = Vec::with_capacity(top.len());
-        for (_imp, addr) in top {
+        for (_score, addr) in top {
             let doc: TantivyDocument = searcher.doc(addr)?;
             hits.push(Hit {
                 id: doc.get_first(self.id).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
@@ -148,65 +220,105 @@ impl Search {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                x: doc
-                    .get_first(self.x)
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                y: doc
-                    .get_first(self.y)
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                r: doc
-                    .get_first(self.r)
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
+                x: doc.get_first(self.x).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                y: doc.get_first(self.y).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                r: doc.get_first(self.r).and_then(|v| v.as_f64()).unwrap_or(0.0),
             });
         }
         Ok(hits)
     }
 
+    /// Normalize text through an analyzer, returning its tokens in order.
+    fn analyze(&self, analyzer: &TextAnalyzer, text: &str) -> Vec<String> {
+        let mut analyzer = analyzer.clone();
+        let mut stream = analyzer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        out
+    }
+
     fn build_query(&self, raw: &str) -> Option<Box<dyn Query>> {
-        let tokens: Vec<String> = raw
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        let tokens = self.analyze(&self.word_analyzer, raw);
         if tokens.is_empty() {
             return None;
         }
 
+        // Recall: every word must match (last word as the prefix being typed).
         let last = tokens.len() - 1;
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(tokens.len());
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         for (i, tok) in tokens.iter().enumerate() {
-            if i == last {
-                // The word being typed: prefix match via an anchored regex over
-                // the term dictionary, falling back to an exact term.
-                let pattern = format!("{}.*", regex::escape(tok));
-                let clause: Box<dyn Query> = match RegexQuery::from_pattern(&pattern, self.title) {
-                    Ok(q) => Box::new(q),
-                    Err(_) => Box::new(TermQuery::new(
-                        Term::from_field_text(self.title, tok),
-                        IndexRecordOption::Basic,
-                    )),
-                };
-                clauses.push((Occur::Must, clause));
+            let clause = if i == last {
+                self.prefix_or_fuzzy(tok)
             } else {
-                // A complete word: exact, OR fuzzy for longer words.
-                let term = Term::from_field_text(self.title, tok);
-                let exact: Box<dyn Query> =
-                    Box::new(TermQuery::new(term.clone(), IndexRecordOption::Basic));
-                let clause: Box<dyn Query> = if tok.chars().count() >= FUZZY_MIN_LEN {
-                    let fuzzy = FuzzyTermQuery::new(term, 1, true);
-                    Box::new(BooleanQuery::new(vec![
-                        (Occur::Should, exact),
-                        (Occur::Should, Box::new(fuzzy)),
-                    ]))
-                } else {
-                    exact
-                };
-                clauses.push((Occur::Must, clause));
+                self.exact_or_fuzzy(tok)
+            };
+            clauses.push((Occur::Must, clause));
+        }
+
+        // Boosts: reward exact / starts-with on the normalized whole title.
+        if let Some(full) = self.analyze(&self.raw_analyzer, raw).into_iter().next() {
+            let exact = TermQuery::new(
+                Term::from_field_text(self.title_raw, &full),
+                IndexRecordOption::Basic,
+            );
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(exact), EXACT_BOOST)),
+            ));
+            if let Ok(rx) =
+                RegexQuery::from_pattern(&format!("{}.*", regex::escape(&full)), self.title_raw)
+            {
+                clauses.push((
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(rx), PREFIX_BOOST)),
+                ));
             }
         }
+
         Some(Box::new(BooleanQuery::new(clauses)))
+    }
+
+    /// A completed word: exact, OR edit-distance-1 fuzzy when long enough.
+    fn exact_or_fuzzy(&self, tok: &str) -> Box<dyn Query> {
+        let term = Term::from_field_text(self.title, tok);
+        let exact: Box<dyn Query> =
+            Box::new(TermQuery::new(term.clone(), IndexRecordOption::WithFreqs));
+        if tok.chars().count() >= FUZZY_MIN_LEN {
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Should, exact),
+                (Occur::Should, Box::new(FuzzyTermQuery::new(term, 1, true))),
+            ]))
+        } else {
+            exact
+        }
+    }
+
+    /// The word being typed: prefix, OR fuzzy when long enough (typo tolerance
+    /// mid-type).
+    fn prefix_or_fuzzy(&self, tok: &str) -> Box<dyn Query> {
+        let mut subs: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        if let Ok(rx) = RegexQuery::from_pattern(&format!("{}.*", regex::escape(tok)), self.title) {
+            subs.push((Occur::Should, Box::new(rx)));
+        }
+        if tok.chars().count() >= FUZZY_MIN_LEN {
+            subs.push((
+                Occur::Should,
+                Box::new(FuzzyTermQuery::new(
+                    Term::from_field_text(self.title, tok),
+                    1,
+                    true,
+                )),
+            ));
+        }
+        if subs.is_empty() {
+            Box::new(TermQuery::new(
+                Term::from_field_text(self.title, tok),
+                IndexRecordOption::WithFreqs,
+            ))
+        } else {
+            Box::new(BooleanQuery::new(subs))
+        }
     }
 }
