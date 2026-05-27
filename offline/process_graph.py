@@ -1,8 +1,8 @@
 import math
 from pathlib import Path
 
-import cudf
-import cugraph
+import cudf  # pyright: ignore[reportMissingImports]  # GPU-only (cuda13 extra)
+import cugraph  # pyright: ignore[reportMissingImports]  # GPU-only (cuda13 extra)
 import polars as pl
 from loguru import logger
 

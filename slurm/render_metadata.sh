@@ -9,4 +9,4 @@
 #SBATCH --cpus-per-task=192
 #SBATCH --mem=768gb
 
-uv run python -m tiles.metadata
+uv run python -m offline.tiles.metadata

@@ -59,13 +59,13 @@ from loguru import logger
 from pmtiles.tile import Compression, TileType, tileid_to_zxy
 from tqdm import tqdm
 
-from tiles.common import (
+from offline.tiles.common import (
     TILE_SIZE,
     WORLD_EXTENT,
     compute_max_zoom,
     write_pmtiles,
 )
-from tiles.palette import compute_palette
+from offline.tiles.palette import compute_palette
 
 NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 EDGES_INPUT_PATH = Path("intermediates/extracted_edges.parquet")
@@ -291,7 +291,7 @@ def build_layer(records: pl.DataFrame, z: int) -> dict[tuple[int, int], bytes]:
     for batch in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
         results, total=len(chunks), desc=f"Encoding z={z}", unit=" chunks"
     ):
-        for tx, ty, data in batch:
+        for tx, ty, data in batch:  # pyright: ignore[reportOptionalIterable]
             layer[(tx, ty)] = data
 
     total_bytes = sum(len(b) for b in layer.values())
@@ -362,7 +362,7 @@ def build_page_archive(
     for batch in tqdm(  # pyright: ignore[reportGeneralTypeIssues]
         results, total=len(chunks), desc="Encoding pages", unit=" chunks"
     ):
-        for x, y, data in batch:
+        for x, y, data in batch:  # pyright: ignore[reportOptionalIterable]
             layer[(x, y)] = data
 
     total_bytes = sum(len(b) for b in layer.values())

@@ -8,14 +8,14 @@ from joblib import Parallel, delayed
 from loguru import logger
 from tqdm import tqdm
 
-from tiles.common import (
+from offline.tiles.common import (
     TILE_SIZE,
     WORLD_EXTENT,
     compute_max_zoom,
     encode_webp_lossless,
     write_pmtiles,
 )
-from tiles.palette import compute_palette
+from offline.tiles.palette import compute_palette
 
 NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 

@@ -1,0 +1,5 @@
+/target
+Cargo.lock
+# Data artifacts copied in from the pipeline before `wrangler deploy`.
+/build_data/*
+!/build_data/.gitkeep
