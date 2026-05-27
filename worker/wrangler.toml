@@ -13,7 +13,7 @@ bucket_name = "wikigraph"
 [[containers]]
 class_name = "GraphBackend"
 image = "../backend/Dockerfile"
-instance_type = "standard"
+instance_type = "standard-1"
 max_instances = 3
 
 [[durable_objects.bindings]]
