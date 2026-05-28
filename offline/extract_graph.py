@@ -1,4 +1,5 @@
 import bz2
+import html
 import re
 from pathlib import Path
 
@@ -116,8 +117,13 @@ def process_stream(
         if not title_match or not text_match:
             continue
 
-        title = normalize_title(title_match.group(1))
-        text = text_match.group(1)
+        # The dump XML-escapes the wikitext inside <text>, so `<ref>` is stored
+        # as `&lt;ref&gt;` and titles like "AT&T" as "AT&amp;T". Decode entities
+        # before any regex (REF_RE, LINK_RE) or title normalization — otherwise
+        # ref-stripping silently no-ops and every cited publisher/journal leaks
+        # into the link graph.
+        title = normalize_title(html.unescape(title_match.group(1)))
+        text = html.unescape(text_match.group(1))
 
         # Strip inline citations (removes links to publishers, authors, journals)
         text = REF_RE.sub("", text)
