@@ -4,18 +4,22 @@
 //!   - tokens are whitespace-split, lowercased, and ASCII-folded (so `beyonce`
 //!     finds *Beyoncé*); the query is run through the same analyzers so the
 //!     index and query normalize identically;
-//!   - every complete word must match (exact, OR edit-distance-1 fuzzy for
-//!     words >= 4 chars to tolerate typos);
+//!   - every complete word must match exact, or fuzzy with an edit budget
+//!     scaled by length (none <4, 1 for 4-7, 2 for 8+), so "phsycology"
+//!     reaches *Psychology*;
 //!   - the final word — the one being typed — matches as a prefix OR fuzzy.
 //!
 //! Ranking is tiered so an exact title always wins, regardless of PageRank
 //! (typing "SoFi" must return *SoFi* even though it's a low-PageRank page):
 //!   - the token match above is the recall filter (MUST);
-//!   - boosted SHOULD clauses on the normalized whole title reward an exact
-//!     title (x1000) and a title that starts with the query (x100);
-//!   - `tweak_score` then multiplies the base score by `1 + imp`, where `imp`
-//!     is importance (PageRank) normalized to [0, 1]. Importance only orders
-//!     results *within* a tier; the 1000x exact boost can't be overtaken by it.
+//!   - boosted SHOULD clauses reward an exact title (x1000), a title that
+//!     starts with the query (x100), and an in-order phrase match with small
+//!     slop (x10) — so "world war" promotes *World War II* over *War of the
+//!     Worlds*;
+//!   - `tweak_score` then multiplies the base score by `1 + 4*imp`, where
+//!     `imp` is importance (PageRank) normalized to [0, 1]. Importance only
+//!     orders results *within* a tier; the 10x gap between tiers stays
+//!     wider than the <=5x importance multiplier.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,7 +28,10 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, Query, RegexQuery, TermQuery};
+use tantivy::indexer::NoMergePolicy;
+use tantivy::query::{
+    BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, RegexQuery, TermQuery,
+};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED,
 };
@@ -35,15 +42,26 @@ use tantivy::{doc, DocId, Index, IndexReader, Score, SegmentReader, TantivyDocum
 
 const TOKENIZER: &str = "title"; // word-split + lowercase + ascii-fold
 const RAW_TOKENIZER: &str = "title_raw"; // whole title as one token, normalized
-const FUZZY_MIN_LEN: usize = 4;
 
-// Tier boosts. Exact title dominates starts-with, which dominates a plain token
-// match. The gaps are wide enough that the <=2x importance multiplier can't
-// reorder across tiers.
+// Tier boosts. Exact > starts-with > phrase > plain token match. Each gap is
+// 10x, which stays wider than the <=5x importance multiplier so importance
+// can't reorder across tiers.
 const EXACT_BOOST: Score = 1000.0;
 const PREFIX_BOOST: Score = 100.0;
-// imp is normalized to [0, 1]; weight 1.0 => multiplier in [1, 2].
-const IMPORTANCE_WEIGHT: f64 = 1.0;
+const PHRASE_BOOST: Score = 10.0;
+// imp is normalized to [0, 1]; weight 4.0 => multiplier in [1, 5].
+const IMPORTANCE_WEIGHT: f64 = 4.0;
+
+/// Edit-distance budget for a token, scaled by length. Short tokens get no
+/// fuzzy (every char carries too much signal); long tokens get 2 to catch
+/// double-typos like "phsycology" -> "psychology". None means exact-only.
+fn fuzzy_distance(tok: &str) -> Option<u8> {
+    match tok.chars().count() {
+        0..=3 => None,
+        4..=7 => Some(1),
+        _ => Some(2),
+    }
+}
 
 #[derive(Deserialize)]
 struct InputDoc {
@@ -93,7 +111,7 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     let mut sb = Schema::builder();
     let title_indexing = TextFieldIndexing::default()
         .set_tokenizer(TOKENIZER)
-        .set_index_option(IndexRecordOption::WithFreqs);
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     let title_opts = TextOptions::default()
         .set_indexing_options(title_indexing)
         .set_stored();
@@ -116,6 +134,9 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     let index = Index::create_in_dir(index_dir, schema)?;
     register_tokenizers(&index);
     let mut writer = index.writer(512_000_000)?; // 512 MB indexing heap
+    // Disable auto-merge so our explicit force-merge below doesn't race with
+    // background merges already consuming the same segments.
+    writer.set_merge_policy(Box::new(NoMergePolicy));
 
     // Pass 1: importance range on a log scale (PageRank is heavy-tailed).
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -143,6 +164,17 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
         count += 1;
     })?;
     writer.commit()?;
+
+    // Force-merge to a single segment. The index is built once at image-build
+    // time and never written again, so the default lazy merge policy leaves
+    // free perf on the table — one segment means one term dictionary lookup
+    // per query and ~20-30% smaller on disk.
+    let segment_ids = index.searchable_segment_ids()?;
+    if segment_ids.len() > 1 {
+        writer.merge(&segment_ids).wait()?;
+    }
+    writer.wait_merging_threads()?;
+
     tracing::info!(docs = count, "search index built");
     Ok(())
 }
@@ -284,37 +316,53 @@ impl Search {
             }
         }
 
+        // Phrase proximity: when there are 2+ tokens, reward in-order matches
+        // (small slop tolerates a stop-word or comma between them). Separates
+        // "World War II" from "War of the Worlds" on a "world war" query.
+        if tokens.len() >= 2 {
+            let terms: Vec<Term> = tokens
+                .iter()
+                .map(|t| Term::from_field_text(self.title, t))
+                .collect();
+            let mut phrase = PhraseQuery::new(terms);
+            phrase.set_slop(2);
+            clauses.push((
+                Occur::Should,
+                Box::new(BoostQuery::new(Box::new(phrase), PHRASE_BOOST)),
+            ));
+        }
+
         Some(Box::new(BooleanQuery::new(clauses)))
     }
 
-    /// A completed word: exact, OR edit-distance-1 fuzzy when long enough.
+    /// A completed word: exact, OR length-scaled fuzzy (see `fuzzy_distance`).
     fn exact_or_fuzzy(&self, tok: &str) -> Box<dyn Query> {
         let term = Term::from_field_text(self.title, tok);
         let exact: Box<dyn Query> =
             Box::new(TermQuery::new(term.clone(), IndexRecordOption::WithFreqs));
-        if tok.chars().count() >= FUZZY_MIN_LEN {
+        if let Some(d) = fuzzy_distance(tok) {
             Box::new(BooleanQuery::new(vec![
                 (Occur::Should, exact),
-                (Occur::Should, Box::new(FuzzyTermQuery::new(term, 1, true))),
+                (Occur::Should, Box::new(FuzzyTermQuery::new(term, d, true))),
             ]))
         } else {
             exact
         }
     }
 
-    /// The word being typed: prefix, OR fuzzy when long enough (typo tolerance
+    /// The word being typed: prefix, OR length-scaled fuzzy (typo tolerance
     /// mid-type).
     fn prefix_or_fuzzy(&self, tok: &str) -> Box<dyn Query> {
         let mut subs: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         if let Ok(rx) = RegexQuery::from_pattern(&format!("{}.*", regex::escape(tok)), self.title) {
             subs.push((Occur::Should, Box::new(rx)));
         }
-        if tok.chars().count() >= FUZZY_MIN_LEN {
+        if let Some(d) = fuzzy_distance(tok) {
             subs.push((
                 Occur::Should,
                 Box::new(FuzzyTermQuery::new(
                     Term::from_field_text(self.title, tok),
-                    1,
+                    d,
                     true,
                 )),
             ));
