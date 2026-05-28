@@ -52,6 +52,7 @@ struct InputDoc {
     x: f64,
     y: f64,
     r: f64,
+    cl: u32,
     imp: f64,
 }
 
@@ -62,6 +63,7 @@ pub struct Hit {
     pub x: f64,
     pub y: f64,
     pub r: f64,
+    pub cl: u32,
 }
 
 fn register_tokenizers(index: &Index) {
@@ -107,6 +109,7 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     let x = sb.add_f64_field("x", STORED);
     let y = sb.add_f64_field("y", STORED);
     let r = sb.add_f64_field("r", STORED);
+    let cl = sb.add_u64_field("cl", STORED);
     let imp = sb.add_f64_field("imp", FAST);
     let schema = sb.build();
 
@@ -134,6 +137,7 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
             x => d.x,
             y => d.y,
             r => d.r,
+            cl => d.cl as u64,
             imp => imp_norm,
         ));
         count += 1;
@@ -163,6 +167,7 @@ pub struct Search {
     x: Field,
     y: Field,
     r: Field,
+    cl: Field,
     word_analyzer: TextAnalyzer,
     raw_analyzer: TextAnalyzer,
 }
@@ -189,6 +194,7 @@ impl Search {
             x: schema.get_field("x")?,
             y: schema.get_field("y")?,
             r: schema.get_field("r")?,
+            cl: schema.get_field("cl")?,
             word_analyzer,
             raw_analyzer,
         })
@@ -223,6 +229,7 @@ impl Search {
                 x: doc.get_first(self.x).and_then(|v| v.as_f64()).unwrap_or(0.0),
                 y: doc.get_first(self.y).and_then(|v| v.as_f64()).unwrap_or(0.0),
                 r: doc.get_first(self.r).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                cl: doc.get_first(self.cl).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             });
         }
         Ok(hits)
