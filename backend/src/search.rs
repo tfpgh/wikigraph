@@ -7,7 +7,13 @@
 //!   - every complete word must match exact, or fuzzy with an edit budget
 //!     scaled by length (none <4, 1 for 4-7, 2 for 8+), so "phsycology"
 //!     reaches *Psychology*;
-//!   - the final word — the one being typed — matches as a prefix OR fuzzy.
+//!   - the final word — the one being typed — matches as a prefix OR fuzzy;
+//!   - small English connector words (and, or, of, the, ...) are demoted from
+//!     MUST to SHOULD when a real token is also present, so "lord of the
+//!     rings" still matches a title that only tokenizes to [lord, rings];
+//!   - a single-character query short-circuits to titles whose first char is
+//!     the typed char (regex on `title_raw`), avoiding a word-level prefix
+//!     scan that would enumerate millions of "a*" tokens.
 //!
 //! Ranking is tiered so an exact title always wins, regardless of PageRank
 //! (typing "SoFi" must return *SoFi* even though it's a low-PageRank page):
@@ -61,6 +67,18 @@ fn fuzzy_distance(tok: &str) -> Option<u8> {
         4..=7 => Some(1),
         _ => Some(2),
     }
+}
+
+/// English function words that get demoted from MUST to SHOULD when other
+/// non-connector tokens are present in the query. Lets "lord of the rings"
+/// match a title whose tokens are just [lord, rings], without losing the
+/// ability to find a title literally called "The" or "And".
+const CONNECTORS: &[&str] = &[
+    "and", "or", "of", "the", "a", "an", "in", "on", "at", "for", "to",
+];
+
+fn is_connector(tok: &str) -> bool {
+    CONNECTORS.contains(&tok)
 }
 
 #[derive(Deserialize)]
@@ -284,16 +302,47 @@ impl Search {
             return None;
         }
 
+        // 1-char query: match titles that *begin* with the char (regex on the
+        // whole-title field), not titles containing any word starting with it.
+        // A word-level "a.*" would enumerate millions of terms and yield a
+        // candidate set too noisy to rank cleanly; the title_raw prefix path
+        // keeps the set small and ordering up to PageRank via tweak_score.
+        if tokens.len() == 1 && tokens[0].chars().count() == 1 {
+            let tok = &tokens[0];
+            let rx = RegexQuery::from_pattern(
+                &format!("{}.*", regex::escape(tok)),
+                self.title_raw,
+            )
+            .ok()?;
+            let exact = TermQuery::new(
+                Term::from_field_text(self.title_raw, tok),
+                IndexRecordOption::Basic,
+            );
+            return Some(Box::new(BooleanQuery::new(vec![
+                (Occur::Must, Box::new(rx)),
+                (
+                    Occur::Should,
+                    Box::new(BoostQuery::new(Box::new(exact), EXACT_BOOST)),
+                ),
+            ])));
+        }
+
         // Recall: every word must match (last word as the prefix being typed).
+        // Connector words demote to SHOULD when a real token is also present
+        // so queries with extra fillers ("lord of the rings") still match
+        // titles whose tokens skip the fillers.
         let last = tokens.len() - 1;
+        let has_non_connector = tokens.iter().any(|t| !is_connector(t));
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         for (i, tok) in tokens.iter().enumerate() {
-            let clause = if i == last {
-                self.prefix_or_fuzzy(tok)
+            let (occur, clause) = if i == last {
+                (Occur::Must, self.prefix_or_fuzzy(tok))
+            } else if has_non_connector && is_connector(tok) {
+                (Occur::Should, self.exact_or_fuzzy(tok))
             } else {
-                self.exact_or_fuzzy(tok)
+                (Occur::Must, self.exact_or_fuzzy(tok))
             };
-            clauses.push((Occur::Must, clause));
+            clauses.push((occur, clause));
         }
 
         // Boosts: reward exact / starts-with on the normalized whole title.
