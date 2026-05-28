@@ -17,7 +17,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use wikigraph_backend::graph::Graph;
-use wikigraph_backend::search::Search;
+use wikigraph_backend::search::{Hit, Search};
 
 struct AppState {
     graph: Graph,
@@ -92,27 +92,33 @@ struct PathParams {
 struct PathResponse {
     found: bool,
     length: usize,
-    path: Vec<u32>,
+    path: Vec<Hit>,
 }
 
 async fn path_handler(
     State(st): State<Arc<AppState>>,
     Query(p): Query<PathParams>,
 ) -> impl IntoResponse {
-    let res = tokio::task::spawn_blocking(move || st.graph.shortest_path(p.from, p.to)).await;
+    let res = tokio::task::spawn_blocking(move || {
+        let Some(ids) = st.graph.shortest_path(p.from, p.to) else {
+            return Ok::<Option<Vec<Hit>>, anyhow::Error>(None);
+        };
+        Ok(Some(st.search.lookup_ids(&ids)?))
+    })
+    .await;
     match res {
-        Ok(Some(path)) => Json(PathResponse {
+        Ok(Ok(Some(path))) => Json(PathResponse {
             found: true,
             length: path.len(),
             path,
         })
         .into_response(),
-        Ok(None) => Json(PathResponse {
+        Ok(Ok(None)) => Json(PathResponse {
             found: false,
             length: 0,
             path: Vec::new(),
         })
         .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

@@ -39,7 +39,7 @@ use tantivy::query::{
     BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, RegexQuery, TermQuery,
 };
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, STORED,
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED, STORED,
 };
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, RawTokenizer, SimpleTokenizer, TextAnalyzer,
@@ -141,7 +141,9 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     let title_raw =
         sb.add_text_field("title_raw", TextOptions::default().set_indexing_options(raw_indexing));
 
-    let id = sb.add_u64_field("id", STORED | FAST);
+    // INDEXED so the /path handler can seek by node id via TermQuery to
+    // enrich BFS results with title/coords/cluster on the way out.
+    let id = sb.add_u64_field("id", STORED | FAST | INDEXED);
     let x = sb.add_f64_field("x", STORED);
     let y = sb.add_f64_field("y", STORED);
     let r = sb.add_f64_field("r", STORED);
@@ -283,6 +285,44 @@ impl Search {
             });
         }
         Ok(hits)
+    }
+
+    /// Look up the stored Hit for each id in order. Returns a stub Hit
+    /// (empty title, zeroed coords) for ids that aren't present in the
+    /// index, so the caller's length matches its input.
+    pub fn lookup_ids(&self, ids: &[u32]) -> Result<Vec<Hit>> {
+        let searcher = self.reader.searcher();
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let term = Term::from_field_u64(self.id, id as u64);
+            let q = TermQuery::new(term, IndexRecordOption::Basic);
+            let top = searcher.search(&q, &TopDocs::with_limit(1).order_by_score())?;
+            if let Some((_, addr)) = top.into_iter().next() {
+                let doc: TantivyDocument = searcher.doc(addr)?;
+                out.push(Hit {
+                    id,
+                    t: doc
+                        .get_first(self.title)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    x: doc.get_first(self.x).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    y: doc.get_first(self.y).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    r: doc.get_first(self.r).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    cl: doc.get_first(self.cl).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                });
+            } else {
+                out.push(Hit {
+                    id,
+                    t: String::new(),
+                    x: 0.0,
+                    y: 0.0,
+                    r: 0.0,
+                    cl: 0,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Normalize text through an analyzer, returning its tokens in order.
