@@ -34,7 +34,9 @@ Three artifacts land in output/:
 
    Page entry shape:
        {
-         "id": 12345, "t": "United States", "cl": 7, "pr": 1,
+         "id": 12345, "t": "United States",
+         "x": 32100.5, "y": 18000.2, "r": 40.0,   # the node's own geometry
+         "cl": 7, "pr": 1,
          "no": 1503, "ni": 251032,            # true out/in degree
          "ob": [[cl, count], ...],            # true outlinks grouped by cluster
          "ib": [[cl, count], ...],            # true inlinks grouped by cluster
@@ -309,11 +311,16 @@ def encode_page_chunk(chunk: pl.DataFrame, base: int) -> list[tuple[int, int, by
     tileid = base + id, where base is the first tileid at the packing zoom.
     """
     rows: list[tuple[int, int, bytes]] = []
-    for rid, t, cl, pr, no, ni, ob, inb, out, inn in chunk.iter_rows():
-        _, x, y = tileid_to_zxy(base + rid)
+    for rid, t, x, y, r, cl, pr, no, ni, ob, inb, out, inn in chunk.iter_rows():
+        # tx/ty are the PMTiles slot for this page id; x/y/r are the node's own
+        # world geometry (so a page lookup can place/zoom to the node directly).
+        _, tx, ty = tileid_to_zxy(base + rid)
         entry = {
             "id": rid,
             "t": t,
+            "x": x,
+            "y": y,
+            "r": r,
             "cl": cl,
             "pr": pr,
             "no": no,
@@ -332,7 +339,7 @@ def encode_page_chunk(chunk: pl.DataFrame, base: int) -> list[tuple[int, int, by
         data = json.dumps(entry, separators=(",", ":"), ensure_ascii=False).encode(
             "utf-8"
         )
-        rows.append((x, y, gzip.compress(data, compresslevel=6)))
+        rows.append((tx, ty, gzip.compress(data, compresslevel=6)))
     return rows
 
 
@@ -352,7 +359,7 @@ def build_page_archive(
     )
 
     sel = records.sort("id").select(
-        "id", "t", "cl", "pr", "no", "ni", "ob", "ib", "out", "inn"
+        "id", "t", "x", "y", "radius", "cl", "pr", "no", "ni", "ob", "ib", "out", "inn"
     )
     chunks = slice_for_parallelism(sel)
     layer: dict[tuple[int, int], bytes] = {}
