@@ -21,7 +21,7 @@ WORKDIR /app
 COPY build_data/graph.csr /opt/data/graph.csr
 
 COPY --from=build /opt/data/index /opt/data/index
-COPY --from=build /app/target/release/server /usr/local/bin/server
+COPY --from=build /usr/local/bin/server /usr/local/bin/server
 
 ENV DATA_DIR=/opt/data
 ENV PORT=8080
