@@ -12,4 +12,7 @@
 #SBATCH --constraint=GPU_SKU:RTX6000
 
 
+set -e
+
 uv run offline/process_graph.py
+uv run offline/remove_overlaps.py

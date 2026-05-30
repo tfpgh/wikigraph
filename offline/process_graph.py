@@ -11,9 +11,9 @@ EDGES_INPUT_PATH = Path("intermediates/extracted_edges.parquet")
 
 PAGERANK_PATH = Path("intermediates/pagerank.parquet")
 CLUSTERS_PATH = Path("intermediates/clusters.parquet")
-LAYOUT_PATH = Path("intermediates/layout.parquet")
+INITIAL_LAYOUT_PATH = Path("intermediates/initial_layout.parquet")
 
-NODES_ENRICHED_PATH = Path("intermediates/enriched_nodes.parquet")
+INITIAL_NODES_PATH = Path("intermediates/initial_enriched_nodes.parquet")
 
 WORLD_EXTENT = 2**16
 
@@ -99,7 +99,7 @@ def compute_layout() -> None:
     PageRank, converted into pass-1's layout space, then carried through pass 2
     so they remain consistent with the final positions.
     """
-    if LAYOUT_PATH.exists():
+    if INITIAL_LAYOUT_PATH.exists():
         logger.info("Layout already computed, skipping")
         return
 
@@ -228,8 +228,8 @@ def compute_layout() -> None:
     )
 
     pos = pos.merge(vertex_radius, on="vertex").rename(columns={"vertex": "id"})
-    pos.to_parquet(LAYOUT_PATH, compression="zstd")
-    logger.success(f"Wrote layout to {LAYOUT_PATH}")
+    pos.to_parquet(INITIAL_LAYOUT_PATH, compression="zstd")
+    logger.success(f"Wrote layout to {INITIAL_LAYOUT_PATH}")
 
 
 def normalize_layout(layout: pl.DataFrame) -> pl.DataFrame:
@@ -263,13 +263,17 @@ def normalize_layout(layout: pl.DataFrame) -> pl.DataFrame:
 
 
 def merge_and_write() -> None:
-    """Join nodes, pagerank, clusters, and layout into the final enriched table."""
-    logger.info("Merging into final node table")
+    """Join nodes, pagerank, clusters, and layout into the initial enriched table.
+
+    "Initial" because remove_overlaps runs next and writes the final table the
+    rest of the pipeline consumes.
+    """
+    logger.info("Merging into initial node table")
 
     nodes = pl.read_parquet(NODES_INPUT_PATH)
     pagerank = pl.read_parquet(PAGERANK_PATH)
     clusters = pl.read_parquet(CLUSTERS_PATH)
-    layout = pl.read_parquet(LAYOUT_PATH)
+    layout = pl.read_parquet(INITIAL_LAYOUT_PATH)
 
     layout = normalize_layout(layout)
 
@@ -280,10 +284,10 @@ def merge_and_write() -> None:
         .sort("id")
     )
 
-    logger.info(f"Final enriched node table: {len(enriched):,} rows")
+    logger.info(f"Initial enriched node table: {len(enriched):,} rows")
     logger.info(f"Schema: {enriched.schema}")
-    enriched.write_parquet(NODES_ENRICHED_PATH, compression="zstd")
-    logger.success(f"Wrote {NODES_ENRICHED_PATH}")
+    enriched.write_parquet(INITIAL_NODES_PATH, compression="zstd")
+    logger.success(f"Wrote {INITIAL_NODES_PATH}")
 
 
 if __name__ == "__main__":
