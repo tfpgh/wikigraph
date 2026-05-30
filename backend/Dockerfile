@@ -1,13 +1,17 @@
+# syntax=docker/dockerfile:1
 FROM rust:1-trixie AS build
 
 WORKDIR /app
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --bins
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --bins && \
+    cp target/release/build_index target/release/server /usr/local/bin/
 
 COPY build_data/search_docs.jsonl /tmp/search_docs.jsonl
-RUN /app/target/release/build_index /tmp/search_docs.jsonl /opt/data/index \
+RUN /usr/local/bin/build_index /tmp/search_docs.jsonl /opt/data/index \
     && rm /tmp/search_docs.jsonl
 
 FROM debian:trixie-slim
