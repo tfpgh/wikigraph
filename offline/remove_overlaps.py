@@ -1,27 +1,3 @@
-"""Remove the residual node overlaps left by ForceAtlas2.
-
-`prevent_overlapping` in process_graph is a soft force, so a small fraction of
-node circles still overlap (quantify it with offline/analyze_overlaps.py). This
-stage reads the initial enriched table, nudges only x/y until no two circles
-overlap, and writes the final enriched table the rest of the pipeline consumes.
-Radii, clusters, and every other column pass through untouched.
-
-The fix is a damped Jacobi relaxation. Each iteration finds every overlapping
-pair, pushes the two nodes apart along their center line by a damped fraction of
-the penetration — split inversely with radius so the smaller node yields and big
-hubs stay put — then re-detects, since a nudged node can graze a new neighbour.
-The overlaps are sparse, shallow, and almost entirely intra-cluster, so the
-displacements are tiny and the macro layout is preserved.
-
-Overlap detection reuses the bbox-into-grid trick from tiles/nodes.py: explode
-each circle into the cells its bounding box touches and self-join on cell id.
-Overlapping circles have overlapping bboxes, so they always share a cell — the
-candidate set is an exact superset, trimmed to true overlaps by the circle test
-in numpy. Because the layout is sparse the candidate set stays roughly O(N).
-
-CPU-only (polars + numpy); runs as the second stage of slurm/process_graph.sh.
-"""
-
 from pathlib import Path
 
 import numpy as np
@@ -31,16 +7,11 @@ from loguru import logger
 INPUT_PATH = Path("intermediates/initial_enriched_nodes.parquet")
 OUTPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 
-# Move each pair this fraction of its penetration per iteration. Below 1 so that
-# conflicting pushes on a shared node relax smoothly instead of oscillating.
 DAMPING = 0.5
 
-# Separate circles to (r_i + r_j)·(1 + SEPARATION_PADDING) so they settle just
-# clear of touching rather than kissing, and so the push crosses zero true
-# overlap with margin instead of asymptoting onto it.
 SEPARATION_PADDING = 0.02
 
-MAX_ITERS = 200
+MAX_ITERS = 500
 
 
 def candidate_pairs(
@@ -95,6 +66,7 @@ def relax(x: np.ndarray, y: np.ndarray, r: np.ndarray) -> None:
         f"damping={DAMPING}, padding={SEPARATION_PADDING:.0%}"
     )
 
+    n_overlap = 0
     for it in range(1, MAX_ITERS + 1):
         i, j = candidate_pairs(x, y, r_pad, cell)
         dx = x[i] - x[j]
@@ -108,7 +80,9 @@ def relax(x: np.ndarray, y: np.ndarray, r: np.ndarray) -> None:
         if n_overlap == 0:
             logger.success(f"iter {it}: no overlaps remain")
             return
-        logger.info(f"iter {it}: {n_overlap:,} overlaps, max pen = {true_pen.max():.4f}")
+        logger.info(
+            f"iter {it}: {n_overlap:,} overlaps, max pen = {true_pen.max():.4f}"
+        )
 
         pad_pen = (r_pad[i] + r_pad[j]) - d
         active = pad_pen > 0
@@ -120,7 +94,9 @@ def relax(x: np.ndarray, y: np.ndarray, r: np.ndarray) -> None:
         # one so the relaxation stays robust rather than producing NaNs.
         coincident = d < 1e-9
         if coincident.any():
-            theta = np.random.default_rng(it).uniform(0, 2 * np.pi, int(coincident.sum()))
+            theta = np.random.default_rng(it).uniform(
+                0, 2 * np.pi, int(coincident.sum())
+            )
             dx[coincident], dy[coincident] = np.cos(theta), np.sin(theta)
             d[coincident] = 1.0
         ux, uy = dx / d, dy / d
@@ -169,7 +145,9 @@ def remove_overlaps(nodes: pl.DataFrame) -> pl.DataFrame:
     r_pad = r * (1.0 + SEPARATION_PADDING)
     cell = max(2.0 * float(np.median(r_pad)), float(r_pad.max()) / 32.0)
     vi, vj = candidate_pairs(xf, yf, r_pad, cell)
-    residual = int(((r[vi] + r[vj]) - np.hypot(xf[vi] - xf[vj], yf[vi] - yf[vj]) > 0).sum())
+    residual = int(
+        ((r[vi] + r[vj]) - np.hypot(xf[vi] - xf[vj], yf[vi] - yf[vj]) > 0).sum()
+    )
     if residual:
         logger.warning(f"{residual:,} overlaps remain after {dtype} rounding")
     else:
