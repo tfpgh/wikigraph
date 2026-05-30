@@ -11,8 +11,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/build_index target/release/server /usr/local/bin/
 
 COPY build_data/search_docs.jsonl /tmp/search_docs.jsonl
-RUN /usr/local/bin/build_index /tmp/search_docs.jsonl /opt/data/index \
-    && rm /tmp/search_docs.jsonl
+RUN /usr/local/bin/build_index /tmp/search_docs.jsonl /opt/data/index
 
 FROM debian:trixie-slim
 
