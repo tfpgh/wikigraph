@@ -12,6 +12,12 @@ Per-line shape (keys match what the backend returns to the frontend, plus
 matches by it so the most important matching article surfaces first. x/y/radius
 are Float32 in the parquet (cuGraph), so cast to Float64 before rounding or the
 JSON floats serialize long.
+
+`a` is the list of redirect titles pointing at the node (e.g. ["USA", "America"]
+for United States); the backend indexes them as extra searchable values of the
+title field so a query for an alias resolves to the node, then drops aliases
+that tokenize identically to the canonical title. An empty list when the node
+has no redirects.
 """
 
 from pathlib import Path
@@ -20,6 +26,7 @@ import polars as pl
 from loguru import logger
 
 NODES_INPUT_PATH = Path("intermediates/enriched_nodes.parquet")
+REDIRECTS_INPUT_PATH = Path("intermediates/extracted_redirects.parquet")
 SEARCH_DOCS_OUTPUT_PATH = Path("output/search_docs.jsonl")
 
 COORD_DECIMALS = 2
@@ -41,6 +48,20 @@ if __name__ == "__main__":
         pl.col("radius").cast(pl.Float64).round(COORD_DECIMALS).alias("r"),
         pl.col("partition").cast(pl.UInt32).alias("cl"),
         pl.col("pagerank").cast(pl.Float64).alias("imp"),
+    )
+
+    # Attach redirect aliases as a per-node list under `a`. Group to one row per
+    # id so the left join can't fan out, and fill nodes with no redirects with an
+    # empty list (a JSON null would fail to deserialize into the backend's Vec).
+    aliases = (
+        pl.read_parquet(REDIRECTS_INPUT_PATH, columns=["alias", "id"])
+        .group_by("id")
+        .agg(pl.col("alias").alias("a"))
+    )
+    logger.info(f"Loaded redirect aliases for {len(aliases):,} nodes")
+
+    docs = docs.join(aliases, on="id", how="left").with_columns(
+        pl.col("a").fill_null(pl.lit([], dtype=pl.List(pl.String)))
     )
 
     SEARCH_DOCS_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)

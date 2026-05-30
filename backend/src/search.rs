@@ -29,6 +29,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -44,7 +45,7 @@ use tantivy::schema::{
 use tantivy::tokenizer::{
     AsciiFoldingFilter, LowerCaser, RawTokenizer, SimpleTokenizer, TextAnalyzer,
 };
-use tantivy::{doc, DocId, Index, IndexReader, Score, SegmentReader, TantivyDocument, Term};
+use tantivy::{DocId, Index, IndexReader, Score, SegmentReader, TantivyDocument, Term};
 
 const TOKENIZER: &str = "title"; // word-split + lowercase + ascii-fold
 const RAW_TOKENIZER: &str = "title_raw"; // whole title as one token, normalized
@@ -90,6 +91,10 @@ struct InputDoc {
     r: f64,
     cl: u32,
     imp: f64,
+    /// Redirect titles that point at this node. Indexed as extra title values
+    /// for recall; never stored. Absent for nodes with no redirects.
+    #[serde(default)]
+    a: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -127,19 +132,27 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     std::fs::create_dir_all(index_dir)?;
 
     let mut sb = Schema::builder();
+
+    // Recall field: word-tokenized, multi-valued (canonical title + every
+    // redirect alias). Not stored — storing the aliases would inflate the doc
+    // store, and the display string is served from `t` instead.
     let title_indexing = TextFieldIndexing::default()
         .set_tokenizer(TOKENIZER)
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-    let title_opts = TextOptions::default()
-        .set_indexing_options(title_indexing)
-        .set_stored();
-    let title = sb.add_text_field("title", title_opts);
+    let title =
+        sb.add_text_field("title", TextOptions::default().set_indexing_options(title_indexing));
 
+    // Whole-title raw field for exact / starts-with boosts, also multi-valued
+    // over the aliases.
     let raw_indexing = TextFieldIndexing::default()
         .set_tokenizer(RAW_TOKENIZER)
         .set_index_option(IndexRecordOption::Basic);
     let title_raw =
         sb.add_text_field("title_raw", TextOptions::default().set_indexing_options(raw_indexing));
+
+    // Stored display title (canonical only): returned to the client and used by
+    // the /path enrichment. Stored, not indexed.
+    let t = sb.add_text_field("t", STORED);
 
     // INDEXED so the /path handler can seek by node id via TermQuery to
     // enrich BFS results with title/coords/cluster on the way out.
@@ -167,20 +180,44 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     })?;
     let span = (hi - lo).max(1e-9);
 
-    // Pass 2: index with normalized importance.
+    // Pass 2: index with normalized importance. Each redirect alias is added as
+    // an extra value of the title/title_raw fields (multi-valued) so a query for
+    // the alias resolves to this node — without a separate document, which would
+    // duplicate the stored fields and surface duplicate hits. Aliases that
+    // tokenize identically to the canonical title (or to an alias already kept
+    // for this node) add no recall and are skipped.
+    let mut wa = index
+        .tokenizers()
+        .get(TOKENIZER)
+        .expect("title tokenizer registered");
     let mut count = 0u64;
     for_each_doc(docs_path, |d| {
         let imp_norm = (((d.imp.max(1e-12).ln()) - lo) / span).clamp(0.0, 1.0);
-        let _ = writer.add_document(doc!(
-            title => d.t.clone(),
-            title_raw => d.t,
-            id => d.id as u64,
-            x => d.x,
-            y => d.y,
-            r => d.r,
-            cl => d.cl as u64,
-            imp => imp_norm,
-        ));
+
+        let mut document = TantivyDocument::new();
+        document.add_text(t, &d.t);
+        document.add_text(title, &d.t);
+        document.add_text(title_raw, &d.t);
+
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(token_key(&mut wa, &d.t));
+        for alias in &d.a {
+            let key = token_key(&mut wa, alias);
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            document.add_text(title, alias);
+            document.add_text(title_raw, alias);
+        }
+
+        document.add_u64(id, d.id as u64);
+        document.add_f64(x, d.x);
+        document.add_f64(y, d.y);
+        document.add_f64(r, d.r);
+        document.add_u64(cl, d.cl as u64);
+        document.add_f64(imp, imp_norm);
+
+        let _ = writer.add_document(document);
         count += 1;
     })?;
     writer.commit()?;
@@ -199,6 +236,20 @@ pub fn build(index_dir: &Path, docs_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Join a string's word-analyzer tokens into one key, so strings that normalize
+/// to the same ordered token sequence (case / diacritic / punctuation variants)
+/// compare equal. Used to drop redirect aliases that add no recall over the
+/// canonical title. The `\u{1}` separator can't appear in a token (the simple
+/// tokenizer splits on non-alphanumerics), so distinct token runs never collide.
+fn token_key(analyzer: &mut TextAnalyzer, text: &str) -> String {
+    let mut stream = analyzer.token_stream(text);
+    let mut parts: Vec<String> = Vec::new();
+    while stream.advance() {
+        parts.push(stream.token().text.clone());
+    }
+    parts.join("\u{1}")
+}
+
 fn for_each_doc(path: &Path, mut f: impl FnMut(InputDoc)) -> Result<()> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     for line in BufReader::new(file).lines() {
@@ -215,6 +266,7 @@ pub struct Search {
     reader: IndexReader,
     title: Field,
     title_raw: Field,
+    t: Field,
     id: Field,
     x: Field,
     y: Field,
@@ -242,6 +294,7 @@ impl Search {
             reader: index.reader()?,
             title: schema.get_field("title")?,
             title_raw: schema.get_field("title_raw")?,
+            t: schema.get_field("t")?,
             id: schema.get_field("id")?,
             x: schema.get_field("x")?,
             y: schema.get_field("y")?,
@@ -274,7 +327,7 @@ impl Search {
             hits.push(Hit {
                 id: doc.get_first(self.id).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 t: doc
-                    .get_first(self.title)
+                    .get_first(self.t)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -302,7 +355,7 @@ impl Search {
                 out.push(Hit {
                     id,
                     t: doc
-                        .get_first(self.title)
+                        .get_first(self.t)
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string(),

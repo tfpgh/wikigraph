@@ -13,6 +13,7 @@ DUMP_PATH = Path("dumps/enwiki-20260501-pages-articles-multistream.xml.bz2")
 
 NODES_OUTPUT_PATH = Path("intermediates/extracted_nodes.parquet")
 EDGES_OUTPUT_PATH = Path("intermediates/extracted_edges.parquet")
+REDIRECTS_OUTPUT_PATH = Path("intermediates/extracted_redirects.parquet")
 
 REDIRECT_MAX_HOPS = 10
 
@@ -246,9 +247,27 @@ if __name__ == "__main__":
     )
     logger.info(f"Final edges: {len(edges_df):,}")
 
+    # Redirect aliases for search indexing: map each redirect's (chain-resolved)
+    # target title to its node id, keeping the redirect title as a searchable
+    # alias. The inner join drops redirects whose target isn't a live node
+    # (broken, non-article, or filtered). Redirect titles are disjoint from
+    # article titles by construction, so an alias can never shadow a real node.
+    logger.info("Mapping redirect aliases to node ids")
+    redirect_aliases = (
+        pl.DataFrame(
+            {"alias": list(redirects.keys()), "target": list(redirects.values())},
+            schema={"alias": pl.Utf8, "target": pl.Utf8},
+        )
+        .join(nodes_df.rename({"title": "target"}), on="target", how="inner")
+        .select(["alias", "id"])
+    )
+    logger.info(f"Redirect aliases on live nodes: {len(redirect_aliases):,}")
+
     logger.info("Writing parquets")
     nodes_df.write_parquet(NODES_OUTPUT_PATH, compression="zstd")
     edges_df.write_parquet(EDGES_OUTPUT_PATH, compression="zstd")
+    redirect_aliases.write_parquet(REDIRECTS_OUTPUT_PATH, compression="zstd")
     logger.success(
-        f"Wrote {len(nodes_df):,} nodes and {len(edges_df):,} edges to parquets"
+        f"Wrote {len(nodes_df):,} nodes, {len(edges_df):,} edges, "
+        f"and {len(redirect_aliases):,} redirect aliases to parquets"
     )
