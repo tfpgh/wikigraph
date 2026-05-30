@@ -7,7 +7,7 @@ from loguru import logger
 INPUT_PATH = Path("intermediates/initial_enriched_nodes.parquet")
 OUTPUT_PATH = Path("intermediates/enriched_nodes.parquet")
 
-DAMPING = 0.5
+DAMPING = 1.5
 
 SEPARATION_PADDING = 0.02
 
